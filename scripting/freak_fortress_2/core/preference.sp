@@ -1,0 +1,2588 @@
+#pragma semicolon 1
+#pragma newdecls required
+
+#define FILE_DIFF		"data/freak_fortress_2/modifiers.cfg"
+
+static ConfigMap Difficulties;
+static int BossOverride = -1;
+static int ViewingPack[MAXTF2PLAYERS];
+static int ViewingPage[MAXTF2PLAYERS];
+static ArrayList ViewingBoss[MAXTF2PLAYERS];
+static int PartyLeader[MAXTF2PLAYERS];
+static int PartyChoice[MAXTF2PLAYERS];
+static int PartyMainBoss[MAXTF2PLAYERS];
+static int PartyInvite[MAXTF2PLAYERS][MAXTF2PLAYERS];
+static bool UpdateDataBase[MAXTF2PLAYERS];
+static char DiffOverride[MAXTF2PLAYERS][64];
+static ArrayList BossListing[MAXTF2PLAYERS];
+static ArrayList DiffListing[MAXTF2PLAYERS];
+
+void Preference_PluginStart()
+{
+	RegFreakCmd("boss", Preference_BossMenuCmd, "Freak Fortress 2 Boss Selection");
+	RegFreakCmd("party", Preference_BossMenuCmd, "Freak Fortress 2 Boss Selection", FCVAR_HIDDEN);
+	RegFreakCmd("modifier", Preference_DifficultyMenuCmd, "Freak Fortress 2 Boss Modifiers");
+	RegFreakCmd("modifiers", Preference_DifficultyMenuCmd, "Freak Fortress 2 Boss Modifiers", FCVAR_HIDDEN);
+	RegFreakCmd("difficulty", Preference_DifficultyMenuCmd, "Freak Fortress 2 Boss Modifiers", FCVAR_HIDDEN);
+	RegFreakCmd("special", Preference_DifficultyMenuCmd, "Freak Fortress 2 Boss Modifiers", FCVAR_HIDDEN);
+	
+	RegAdminCmd("ff2_override", Preference_ForceBossCmd, ADMFLAG_CHEATS, "Force a specific boss to appear");
+	
+	for(int a; a < sizeof(PartyInvite); a++)
+	{
+		for(int b; b < sizeof(PartyInvite[]); b++)
+		{
+			PartyInvite[a][b] = -1;
+		}
+	}
+}
+
+void Preference_ConfigsExecuted()
+{
+	if(Difficulties)
+		DeleteCfg(Difficulties);
+	
+	char buffer[PLATFORM_MAX_PATH];
+	BuildPath(Path_SM, buffer, sizeof(buffer), FILE_DIFF);
+	if(FileExists(buffer))
+	{
+		Difficulties = new ConfigMap(FILE_DIFF);
+		
+		StringMapSnapshot snap = Difficulties.Snapshot();
+		
+		if(!snap.Length)
+		{
+			DeleteCfg(Difficulties);
+			Difficulties = null;
+		}
+		
+		delete snap;
+	}
+	else
+	{
+		Difficulties = null;
+	}
+}
+
+void Preference_MapEnd()
+{
+	BossOverride = -1;
+}
+
+void Preference_AddBoss(int client, const char[] name)
+{
+	if(!BossListing[client])
+		BossListing[client] = new ArrayList();
+	
+	if(name[0] == '#')
+	{
+		BossListing[client].Push(-1-StringToInt(name[1]));
+	}
+	else
+	{
+		int special = Bosses_GetByName(name, true, false, _, "filename");
+		if(special != -1 && Preference_CanAccessBoss(client, special, PREF_MENU))
+			BossListing[client].Push(special);
+	}
+}
+
+void Preference_AddDifficulty(int client, const char[] name)
+{
+	if(!DiffListing[client])
+		DiffListing[client] = new ArrayList(ByteCountToCells(64));
+	
+	DiffListing[client].PushString(name);
+}
+
+bool Preference_ShouldUpdate(int client)
+{
+	return UpdateDataBase[client];
+}
+
+ArrayList Preference_GetBossListing(int client)
+{
+	return BossListing[client];
+}
+
+bool Preference_GetBoss(int client, int index, char[] buffer = "", int length = 0)
+{
+	if(!BossListing[client] || index >= BossListing[client].Length)
+		return false;
+	
+	int special = BossListing[client].Get(index);
+	if(special < 0)
+	{
+		Format(buffer, length, "#%d", -1-special);
+	}
+	else
+	{
+		Bosses_GetBossName(special, buffer, length, _, "filename");
+	}
+	return true;
+}
+
+bool Preference_GetDifficulty(int client, int index, char[] buffer, int length)
+{
+	if(!DiffListing[client] || index >= DiffListing[client].Length)
+		return false;
+	
+	DiffListing[client].GetString(index, buffer, length);
+	return true;
+}
+
+void Preference_ClearArrays(int client)
+{
+	UpdateDataBase[client] = false;
+	DiffOverride[client][0] = 0;
+	
+	delete BossListing[client];
+	delete DiffListing[client];
+}
+
+bool Preference_DisabledBoss(int client, int charset)
+{
+	if(BossListing[client])
+	{
+		if(BossListing[client].FindValue(-1-charset) != -1)
+			return true;
+	}
+	return false;
+}
+
+bool Preference_CanAccessBoss(int client, int special, int flags, int team = -1, bool &preview = false)
+{
+	ConfigMap cfg = Bosses_GetConfig(special);
+	if(!cfg)
+		return false;
+	
+	bool blocked;
+	if((flags & PREF_ENABLED) && (!cfg.GetBool("enabled", blocked) || !blocked))
+		return false;
+	
+	if(client && (flags & PREF_PLAYING))
+	{
+		// If random is disabled, blocks the boss being played without being selected
+		blocked = false;
+		if(cfg.GetBool("random", blocked, false) && !blocked)
+		{
+			if(!Preference_HasWhitelisted(client, special, false))
+				return false;
+		}
+	}
+	
+	if(flags & PREF_MENU)
+		cfg.GetBool("preview", preview, false);
+	
+	if(flags & PREF_PLAYING)
+	{
+		blocked = false;
+		cfg.GetBool("raidboss", blocked, false);
+		if(blocked != ((flags & PREF_RAID) ? true : false))
+			return false;
+	}
+	
+	static char buffer1[512];
+	if(client && cfg.Get("steamid", buffer1, sizeof(buffer1)))
+	{
+		static char buffer2[64];
+		return GetClientAuthId(client, AuthId_SteamID64, buffer2, sizeof(buffer2)) && StrContains(buffer1, buffer2, false) != -1;
+	}
+	
+	blocked = false;
+	if(cfg.GetBool("blocked", blocked, false) && blocked)
+		return false;
+	
+	blocked = false;
+	if(cfg.GetBool("owner", blocked, false) && blocked)
+		return false;
+	
+	if(team != -1)
+	{
+		int value;
+		if(cfg.GetInt("bossteam", value) && value > TFTeam_Spectator && team != value)
+			return false;
+	}
+	
+	bool admin = view_as<bool>(cfg.Get("admin", buffer1, sizeof(buffer1)));
+	if(admin && client)
+		blocked = !CheckCommandAccess(client, "ff2_all_bosses", ReadFlagString(buffer1), true);
+	
+	if(!admin || blocked)
+	{
+		if(cfg.Get("cvar", buffer1, sizeof(buffer1)))
+		{
+			// If a cvar, check if it's enabled
+			ConVar cvar = FindConVar(buffer1);
+			if(!cvar || !cvar.BoolValue)
+				return false;
+			
+			blocked = false;
+		}
+		
+		if(flags & PREF_MENU)
+			cfg.GetBool("hidden", blocked, false);
+	}
+	
+	return !blocked;
+}
+
+bool Preference_ValidBossSelection(int client, int team = -1)
+{
+	if(Preference_DisabledBoss(client, Charset))
+		return false;
+	
+	if(BossOverride != -1 || !BossListing[client] || Cvar[PrefBlacklist].IntValue >= 0)
+		return true;
+	
+	bool foundBoss, multiLoaded;
+	Bosses_MultipleCharsets(multiLoaded);
+
+	int length = BossListing[client].Length;
+	for(int i; i < length; i++)
+	{
+		int index = BossListing[client].Get(i);
+		if(index < 0)
+			continue;
+		
+		foundBoss = true;
+		if(Preference_CanAccessBoss(client, index, PREF_ENABLED|PREF_PLAYING, team))
+			return true;
+	}
+
+	return (!foundBoss || !multiLoaded);
+}
+
+int Preference_PickBoss(int client, int team = -1, bool raid = false)
+{
+	int special = BossOverride;
+	if(special == -1)
+	{
+		if(!client)
+		{
+			int flags = raid ? (PREF_ENABLED|PREF_PLAYING|PREF_RAID) : (PREF_ENABLED|PREF_PLAYING);
+
+			ArrayList list = new ArrayList();
+			int length = Bosses_GetConfigLength();
+			for(int i; i < length; i++)
+			{
+				if(Preference_CanAccessBoss(client, i, flags, team))
+					list.Push(i);
+			}
+			
+			length = list.Length;
+			if(length)
+			{
+				special = list.Get(GetURandomInt() % length);
+				ForwardOld_OnSpecialSelected(0, special, false);
+			}
+
+			delete list;
+			return special;
+		}
+		else if(PartyLeader[client])
+		{
+			special = PartyMainBoss[PartyLeader[client]];
+		}
+		else
+		{
+			int flags = raid ? (PREF_ENABLED|PREF_PLAYING|PREF_RAID) : (PREF_ENABLED|PREF_PLAYING);
+
+			ArrayList list = new ArrayList();
+			int length = Bosses_GetConfigLength();
+			for(int i; i < length; i++)
+			{
+				if(Preference_CanAccessBoss(client, i, flags, team))
+					list.Push(i);
+			}
+			
+			char buffer[64];
+			length = list.Length;
+			if(length)
+			{
+				int count = Cvar[PrefBlacklist].IntValue;
+				if(BossListing[client] && count != 0)
+				{
+					ArrayList list2 = count > 0 ? list.Clone() : new ArrayList();
+					
+					bool found;
+					int length2 = BossListing[client].Length;
+					for(int i; i < length2; i++)
+					{
+						special = BossListing[client].Get(i);
+						int index = count > 0 ? list2.FindValue(special) : list.FindValue(special);
+						if(index != -1)
+						{
+							if(count > 0)
+							{
+								list2.Erase(index);
+							}
+							else
+							{
+								list2.Push(special);
+							}
+							
+							found = true;
+						}
+					}
+					
+					if(found)
+					{
+						delete list;
+						list = list2;
+						length = list2.Length;
+					}
+					else
+					{
+						delete list2;
+					}
+				}
+				
+				if(length > 1 && Client(client).GetLastPlayed(buffer, sizeof(buffer)))
+				{
+					count = list.FindValue(Bosses_GetByName(buffer, true, _, _, "filename"));
+					if(count != -1)
+					{
+						list.Erase(count);
+						length--;
+					}
+				}
+				
+				count = 0;
+				int[] bosses = new int[MaxClients];
+				for(int i = 1; i <= MaxClients; i++)
+				{
+					if(i != client && Client(i).IsBoss)
+						bosses[count++] = i;
+				}
+				
+				if(length > count)
+				{
+					for(int i; i < count; i++)
+					{
+						if(Client(bosses[i]).Cfg.GetInt("special", special))
+						{
+							special = list.FindValue(special);
+							if(special != -1)
+							{
+								list.Erase(special);
+								length--;
+							}
+						}
+					}
+				}
+				
+				if(Client(client).Index < 0)
+				{
+					for(int i; ; i++)
+					{
+						if(FindClientOfBossIndex(i) == -1)
+						{
+							Client(client).Index = i;
+							break;
+						}
+					}
+				}
+				
+				special = list.Get((GetTime() + client) % length);
+				ForwardOld_OnSpecialSelected(Client(client).Index, special, false);
+			}
+			else
+			{
+				Bosses_GetCharsetName(Charset, buffer, sizeof(buffer));
+				LogError("[!!!] Could not find a valid boss in %s (#%d)", buffer, Charset);
+			}
+			
+			delete list;
+			return special;
+		}
+	}
+	
+	ForwardOld_OnSpecialSelected(Client(client).Index, special, true);
+	return special;
+}
+
+static Action Preference_BossMenuCmd(int client, int args)
+{
+	if(GetCmdReplySource() == SM_REPLY_TO_CONSOLE)
+	{
+		int blacklist = Cvar[PrefBlacklist].IntValue;
+		if(args && blacklist != 0)
+		{
+			char buffer[64];
+			GetCmdArgString(buffer, sizeof(buffer));
+			
+			int special = -1;
+			if(buffer[0] == '#')
+			{
+				special = StringToInt(buffer[1]);
+			}
+			else
+			{
+				special = Bosses_GetByName(buffer, false, false, GetClientLanguage(client));
+			}
+			
+			if(Preference_CanAccessBoss(client, special, PREF_MENU))
+			{
+				// Needed to avoid duel selecting
+				if(GetClientMenu(client) != MenuSource_None)
+					CancelClientMenu(client);
+				
+				Bosses_GetBossName(special, buffer, sizeof(buffer), GetClientLanguage(client));
+				ConfigMap cfg = Bosses_GetConfig(special);
+				
+				int index;
+				if(BossListing[client] && (index = BossListing[client].FindValue(special)) != -1)
+				{
+					UpdateDataBase[client] = true;
+					BossListing[client].Erase(index);
+					
+					if(blacklist > 0)
+					{
+						cfg.GetInt("charset", index);
+						index = GetBlacklistCount(client, index);
+						FReplyToCommand(client, "%t (%d / %d)", "Boss Whitelisted", buffer, index, blacklist);
+					}
+					else
+					{
+						FReplyToCommand(client, "%t", "Boss Blacklisted", buffer);
+					}
+				}
+				else if(cfg.GetInt("companion", index))
+				{
+					bool enabled;
+					if(blacklist > 0 || !cfg.GetBool("enabled", enabled) || !enabled)
+					{
+						FReplyToCommand(client, "%t", "Boss No View");
+					}
+					else
+					{
+						delete ViewingBoss[client];
+						ViewingBoss[client] = new ArrayList();
+						ViewingBoss[client].Push(special);
+						CreateParty(client);
+					}
+				}
+				else if(blacklist > 0)
+				{
+					cfg.GetInt("charset", index);
+					index = GetBlacklistCount(client, index);
+					if(index < blacklist)
+					{
+						if(!BossListing[client])
+							BossListing[client] = new ArrayList();
+						
+						UpdateDataBase[client] = true;
+						BossListing[client].Push(special);
+						FReplyToCommand(client, "%t (%d / %d)", "Boss Blacklisted", buffer, index+1, blacklist);
+					}
+					else
+					{
+						FReplyToCommand(client, "%t", "Boss Blacklist Full", index);
+					}
+				}
+				else
+				{
+					if(!BossListing[client])
+						BossListing[client] = new ArrayList();
+					
+					UpdateDataBase[client] = true;
+					BossListing[client].Push(special);
+					FReplyToCommand(client, "%t", "Boss Whitelisted", buffer);
+				}
+			}
+			else
+			{
+				FReplyToCommand(client, "%t", "Boss No View");
+			}
+		}
+		else if(client)
+		{
+			DataPack pack = new DataPack();
+			pack.WriteCell(GetClientUserId(client));
+			pack.WriteCell(0);
+			RequestFrame(Preference_DisplayBosses, pack);
+		}
+		else
+		{
+			char buffer[64];
+			
+			ConfigMap cfg;
+			for(int i; (cfg = Bosses_GetConfig(i)); i++)
+			{
+				Bosses_GetBossNameCfg(cfg, buffer, sizeof(buffer));
+				PrintToServer("#%d %s", i, buffer);
+			}
+		}
+	}
+	else if(args)
+	{
+		char buffer[64];
+		GetCmdArgString(buffer, sizeof(buffer));
+		
+		if(buffer[0] == '#')
+		{
+			delete ViewingBoss[client];
+			ViewingBoss[client] = new ArrayList();
+			ViewingBoss[client].Push(StringToInt(buffer[1]));
+		}
+		else
+		{
+			delete ViewingBoss[client];
+			ViewingBoss[client] = new ArrayList();
+			ViewingBoss[client].Push(Bosses_GetByName(buffer, false, false, GetClientLanguage(client)));
+		}
+		
+		Menu_Command(client);
+		BossMenu(client);
+	}
+	else
+	{
+		ViewingPack[client] = (Enabled && !Bosses_MultiLoadCharsets()) ? Charset : -1;
+		ViewingPage[client] = 0;
+		delete ViewingBoss[client];
+		
+		Menu_Command(client);
+		if(!PartyMenu(client))
+			BossMenu(client);
+	}
+	return Plugin_Handled;
+}
+
+void Preference_BossMenu(int client)
+{
+	ViewingPack[client] = Bosses_MultipleCharsets() ? -1 : Charset;
+	ViewingPage[client] = 0;
+	delete ViewingBoss[client];
+	
+	if(!PartyMenu(client))
+		BossMenu(client);
+}
+
+static void BossMenu(int client)
+{
+	if(!Forward_OnMenuPagePre(client, "preference.bosses"))
+		return;
+	
+	int blacklist = Cvar[PrefBlacklist].IntValue;
+	Menu menu = new Menu(BossMenuH);
+	
+	SetGlobalTransTarget(client);
+	int lang = GetClientLanguage(client);
+	
+	char data[64], buffer[512];
+	if(ViewingBoss[client])
+	{
+		int mainboss =  ViewingBoss[client].Get(0);
+		int subboss = ViewingBoss[client].Get(ViewingBoss[client].Length - 1);
+		
+		bool preview;
+		bool access = Preference_CanAccessBoss(client, mainboss, PREF_MENU, _, preview);
+		if(access || preview)
+		{
+			if(ViewingPack[client] >= 0)
+			{
+				Bosses_GetCharsetName(ViewingPack[client], data, sizeof(data), lang);
+				if(Bosses_GetBossName(subboss, buffer, sizeof(buffer), lang, "description"))
+				{
+					menu.SetTitle("%t%s\n \n%s\n ", "Boss Selection Command", data, buffer);
+				}
+				else
+				{
+					menu.SetTitle("%t%s\n \n%t\n ", "Boss Selection Command", data, "No Description");
+				}
+			}
+			else if(Bosses_GetBossName(subboss, buffer, sizeof(buffer), lang, "description"))
+			{
+				menu.SetTitle("%t\n%s\n ", "Boss Selection Command", buffer);
+			}
+			else
+			{
+				menu.SetTitle("%t\n%t\n ", "Boss Selection Command", "No Description");
+			}
+
+			ConfigMap cfg = Bosses_GetConfig(mainboss);
+			ConfigMap subcfg = Bosses_GetConfig(subboss);
+			
+			if(access && blacklist != 0)
+			{
+				if(!Bosses_GetBossName(mainboss, data, sizeof(data), lang, "group"))
+					Bosses_GetBossName(subboss, data, sizeof(data), lang);
+				
+				int count;
+				if(cfg.GetInt("companion", count))
+				{
+					if(blacklist < 0 && cfg.GetBool("enabled", preview) && preview)
+					{
+						FormatEx(buffer, sizeof(buffer), "%t", "Boss Party", data);
+						menu.AddItem("2", buffer);
+					}
+				}
+				
+				if(BossListing[client] && BossListing[client].FindValue(mainboss) != -1)
+				{
+					if(blacklist > 0)
+					{
+						int charset = ViewingPack[client];
+						if(charset < 0)
+							cfg.GetInt("charset", charset);
+						
+						count = GetBlacklistCount(client, charset);
+						
+						FormatEx(buffer, sizeof(buffer), "%t (%d / %d)", "Boss Whitelist", data, count, blacklist);
+					}
+					else
+					{
+						FormatEx(buffer, sizeof(buffer), "%t", "Boss Blacklist", data);
+					}
+					
+					menu.AddItem("0", buffer);
+				}
+				else if(blacklist > 0)
+				{
+					int charset = ViewingPack[client];
+					if(charset < 0)
+						cfg.GetInt("charset", charset);
+					
+					count = GetBlacklistCount(client, charset);
+					
+					FormatEx(buffer, sizeof(buffer), "%t (%d / %d)", "Boss Blacklist", data, count, blacklist);
+					menu.AddItem(count >= blacklist ? "0" : "1", buffer, count >= blacklist ? ITEMDRAW_DISABLED : ITEMDRAW_DEFAULT);
+				}
+				else
+				{
+					FormatEx(buffer, sizeof(buffer), "%t", "Boss Whitelist", data);
+					menu.AddItem("1", buffer);
+				}
+			}
+			else
+			{
+				menu.AddItem("0", NULL_STRING, ITEMDRAW_NOTEXT);
+			}
+
+			if(Cvar[RankingStyle].IntValue)
+			{
+				if(!subcfg.GetBool("ranks", preview, false) || preview)
+				{
+					Bosses_GetBossName(subboss, data, sizeof(data), _, "filename");
+					int rank = Ranking_GetRank(client, data);
+
+					Bosses_GetBossName(subboss, data, sizeof(data), lang);
+					FormatEx(buffer, sizeof(buffer), "%t", "Current Rank", rank);
+					menu.AddItem("0", buffer, ITEMDRAW_DISABLED);
+				}
+			}
+
+			if(cfg.GetSection("creator"))
+			{
+				FormatEx(buffer, sizeof(buffer), "%t", "View Creators");
+				menu.AddItem("3", buffer);
+			}
+
+			int count;
+			if(subcfg.GetInt("companion", count))
+			{
+				for(int i = menu.ItemCount; i < 6; i++)
+				{
+					menu.AddItem("4", buffer, ITEMDRAW_SPACER);
+				}
+
+				FormatEx(buffer, sizeof(buffer), "%t", "Next");
+				menu.AddItem("4", buffer);
+			}
+			
+			menu.ExitBackButton = true;
+		}
+		else if(ViewingPack[client] >= 0)
+		{
+			Bosses_GetCharsetName(ViewingPack[client], data, sizeof(data), lang);
+			menu.SetTitle("%t%s\n%t", "Boss Selection Command", data, "Boss No View");
+			menu.AddItem("0", NULL_STRING, ITEMDRAW_NOTEXT);
+		}
+		else
+		{
+			menu.SetTitle("%t%t", "Boss Selection Command", "Boss No View");
+			menu.AddItem("0", NULL_STRING, ITEMDRAW_NOTEXT);
+		}
+		
+		menu.ExitBackButton = true;
+		Forward_OnMenuPagePost(client, "preference.bosses", menu);
+		menu.Display(client, MENU_TIME_FOREVER);
+	}
+	else if(ViewingPack[client] >= 0)
+	{
+		if(Bosses_GetCharsetName(ViewingPack[client], data, sizeof(data), lang))
+		{
+			menu.SetTitle("%t%s\n ", "Boss Selection Command", data);
+
+			bool hideDisable = Bosses_IsCharsetSideLoaded(ViewingPack[client]);
+			if(!hideDisable)
+			{
+				if(!Bosses_MultiLoadCharsets(hideDisable))
+					hideDisable = false;
+			}
+
+			ArrayList list = new ArrayList();
+			
+			bool found;
+			int index;
+			ConfigMap cfg;
+			for(int i; (cfg = Bosses_GetConfig(i)); i++)
+			{
+				if(cfg.GetInt("charset", index) && index == ViewingPack[client])
+				{
+					list.Push(i);
+				}
+			}
+
+			bool enabled, raidboss;
+			int length = list.Length;
+			for(int a; a < 2; a++)	// Enabled characters first
+			{
+				for(int b; b < length; b++)
+				{
+					index = list.Get(b);
+					cfg = Bosses_GetConfig(index);
+
+					if(((cfg.GetBool("enabled", enabled) && enabled) && (!cfg.GetBool("raidboss", raidboss, false) || !raidboss)) == (a == 0))
+					{
+						bool preview;
+						bool access = Preference_CanAccessBoss(client, index, PREF_MENU, _, preview);
+						if(access || preview)
+						{
+							IntToString(index, data, sizeof(data));
+							if(!Bosses_GetBossNameCfg(cfg, buffer, sizeof(buffer), lang, "group"))
+								Bosses_GetBossNameCfg(cfg, buffer, sizeof(buffer), lang);
+							
+							if(blacklist != 0)
+							{
+								if(PartyLeader[client] && PartyMainBoss[PartyLeader[client]] == index)
+								{
+									Format(buffer, sizeof(buffer), "%s\n ", buffer);
+
+									if(menu.ItemCount)
+									{
+										menu.InsertItem(0, data, buffer);
+										continue;
+									}
+								}
+								else if(BossListing[client] && BossListing[client].FindValue(index) != -1)
+								{
+									found = true;
+									Format(buffer, sizeof(buffer), "%sX%s %s", a ? "{" : "[", a ? "}" : "]", buffer);
+								}
+								else if(access)
+								{
+									Format(buffer, sizeof(buffer), "%s %s %s", a ? "{" : "[", a ? "}" : "]", buffer);
+								}
+							}
+							
+							menu.AddItem(data, buffer);
+						}
+					}
+				}
+			}
+
+			delete list;
+
+			if(found || blacklist > 0)
+			{
+				FormatEx(data, sizeof(data), "%t\n ", blacklist > 0 ? "Clear Blacklist" : "Clear Whitelist");
+				menu.InsertItem(0, "-1", data, (!found && blacklist > 0) ? ITEMDRAW_DISABLED : ITEMDRAW_DEFAULT);
+			}
+			else if(blacklist != 0)
+			{
+				FormatEx(data, sizeof(data), "%t\n ", "Whitelist All");
+				menu.InsertItem(0, "-4", data);
+			}
+			
+			if(Preference_DisabledBoss(client, ViewingPack[client]))
+			{
+				FormatEx(data, sizeof(data), "%t", "Enable Playing Boss");
+				menu.InsertItem(0, "-3", data);
+			}
+			else if(!hideDisable && Cvar[PrefToggle].BoolValue)
+			{
+				FormatEx(data, sizeof(data), "%t", "Disable Playing Boss");
+				menu.InsertItem(0, "-2", data);
+			}
+		}
+		else
+		{
+			menu.SetTitle("%t", "Boss Selection Command", data);
+			
+			FormatEx(buffer, sizeof(buffer), "%t", "Charset No View");
+			menu.AddItem("-3", buffer, ITEMDRAW_RAWLINE);
+		}
+		
+		menu.ExitBackButton = (Menu_BackButton(client) || Bosses_MultipleCharsets());
+		Forward_OnMenuPagePost(client, "preference.bosses", menu);
+		menu.DisplayAt(client, ViewingPage[client], MENU_TIME_FOREVER);
+	}
+	else
+	{
+		menu.SetTitle("%t", "Boss Selection Command");
+		
+		bool hidden, allLoaded;
+		bool multiLoaded = Bosses_MultiLoadCharsets(allLoaded);
+		int disables, enables;
+		
+		int length = Bosses_GetCharsetLength();
+		for(int i; i < length; i++)
+		{
+			if(!Enabled || i != Charset)
+			{
+				ConfigMap pack = Bosses_GetCharset(i);
+				if(pack.GetBool("hidden", hidden, false) && hidden)
+					continue;
+			}
+			
+			if(Preference_DisabledBoss(client, i))
+			{
+				disables++;
+			}
+			else if(!Bosses_IsCharsetSideLoaded(i))
+			{
+				enables++;
+			}
+		}
+		
+		// Show if any boss pack has one disabled
+		if(disables)
+		{
+			FormatEx(data, sizeof(data), "%t", allLoaded ? "Enable Playing Boss" : "Enable Playing Boss All");
+			menu.AddItem("-3", data);
+		}
+		
+		// Show if any boss pack doesn't have one disabled
+		if(enables && Cvar[PrefToggle].BoolValue)
+		{
+			FormatEx(data, sizeof(data), "%t", allLoaded ? "Disable Playing Boss" : "Disable Playing Boss All");
+			menu.AddItem("-2", data);
+		}
+		
+		// Show if boss pack has a listing that's not related to disables
+		if(BossListing[client] && BossListing[client].Length > disables)
+		{
+			FormatEx(data, sizeof(data), "%t\n ", "Clear All");
+			menu.AddItem("-1", data);
+		}
+		else
+		{
+			menu.AddItem("-1", data, ITEMDRAW_SPACER);
+		}
+		
+		for(int i; i < length; i++)
+		{
+			ConfigMap pack = Bosses_GetCharset(i);
+			
+			Bosses_GetCharsetName(i, buffer, sizeof(buffer), lang);
+			if(Enabled && i == Charset)
+			{
+				if(!multiLoaded)
+					Format(buffer, sizeof(buffer), "%s ✓", buffer);
+			}
+			else if(pack.GetBool("hidden", hidden, false) && hidden)
+			{
+				continue;
+			}
+			
+			IntToString(i, data, sizeof(data));
+			menu.AddItem(data, buffer);
+		}
+		
+		menu.ExitBackButton = Menu_BackButton(client);
+		Forward_OnMenuPagePost(client, "preference.bosses", menu);
+		menu.DisplayAt(client, ViewingPage[client], MENU_TIME_FOREVER);
+	}
+}
+
+static int BossMenuH(Menu menu, MenuAction action, int client, int choice)
+{
+	switch(action)
+	{
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+		case MenuAction_Cancel:
+		{
+			if(choice == MenuCancel_ExitBack)
+			{
+				if(ViewingBoss[client])
+				{
+					int length = ViewingBoss[client].Length;
+					if(length > 1)
+					{
+						ViewingBoss[client].Erase(length - 1);
+						BossMenu(client);
+					}
+					else
+					{
+						delete ViewingBoss[client];
+						BossMenu(client);
+						ViewingPage[client] = 0;
+					}
+				}
+				else if(ViewingPack[client] >= 0 && Bosses_MultipleCharsets())
+				{
+					ViewingPack[client] = -1;
+					BossMenu(client);
+					ViewingPage[client] = 0;
+				}
+				else
+				{
+					Menu_MainMenu(client);
+				}
+			}
+		}
+		case MenuAction_Select:
+		{
+			char buffer[64];
+			menu.GetItem(choice, buffer, sizeof(buffer));
+			int value = StringToInt(buffer);
+			
+			if(ViewingBoss[client])
+			{
+				switch(value)
+				{
+					case 4:
+					{
+						int length = ViewingBoss[client].Length;
+						if(Bosses_GetConfig(ViewingBoss[client].Get(length - 1)).GetInt("companion", length))
+						{
+							ViewingBoss[client].Push(length);
+							BossMenu(client);
+						}
+					}
+					case 3:
+					{
+						CreatorMenu(client);
+					}
+					case 2:
+					{
+						CreateParty(client);
+					}
+					case 1:
+					{
+						UpdateDataBase[client] = true;
+						
+						if(!BossListing[client])
+							BossListing[client] = new ArrayList();
+						
+						BossListing[client].Push(ViewingBoss[client].Get(0));
+						delete ViewingBoss[client];
+						BossMenu(client);
+					}
+					default:
+					{
+						if(BossListing[client])
+						{
+							value = BossListing[client].FindValue(ViewingBoss[client].Get(0));
+							if(value != -1)
+							{
+								UpdateDataBase[client] = true;
+								BossListing[client].Erase(value);
+							}
+						}
+						
+						delete ViewingBoss[client];
+						BossMenu(client);
+					}
+				}
+				
+				ViewingPage[client] = 0;
+			}
+			else if(ViewingPack[client] >= 0)
+			{
+				switch(value)
+				{
+					case -4:
+					{
+						UpdateDataBase[client] = true;
+						
+						if(!BossListing[client])
+							BossListing[client] = new ArrayList();
+						
+						int length = Bosses_GetConfigLength();
+						for(int i; i < length; i++)
+						{
+							ConfigMap cfg = Bosses_GetConfig(i);
+							if(cfg && cfg.GetInt("charset", value) && value == ViewingPack[client])
+							{
+								if(BossListing[client].FindValue(i) == -1)
+								{
+									if(Preference_CanAccessBoss(client, i, PREF_MENU))
+										BossListing[client].Push(i);
+								}
+							}
+						}
+					}
+					case -3:
+					{
+						if(BossListing[client])
+						{
+							value = BossListing[client].FindValue(-1-ViewingPack[client]);
+							if(value != -1)
+							{
+								UpdateDataBase[client] = true;
+								BossListing[client].Erase(value);
+							}
+						}
+					}
+					case -2:
+					{
+						UpdateDataBase[client] = true;
+						
+						if(!BossListing[client])
+							BossListing[client] = new ArrayList();
+						
+						BossListing[client].Push(-1-ViewingPack[client]);
+					}
+					case -1:
+					{
+						if(BossListing[client])
+						{
+							int length = BossListing[client].Length;
+							for(int i; i < length; i++)
+							{
+								ConfigMap cfg = Bosses_GetConfig(BossListing[client].Get(i));
+								if(cfg && cfg.GetInt("charset", value) && value == ViewingPack[client])
+								{
+									UpdateDataBase[client] = true;
+									BossListing[client].Erase(i);
+									i--;
+									length--;
+								}
+							}
+						}
+					}
+					default:
+					{
+						delete ViewingBoss[client];
+						ViewingBoss[client] = new ArrayList();
+						ViewingBoss[client].Push(value);
+					}
+				}
+				
+				BossMenu(client);
+				if(value >= 0)
+					ViewingPage[client] = choice / 7 * 7;
+			}
+			else
+			{
+				switch(value)
+				{
+					case -3:
+					{
+						if(BossListing[client])
+						{
+							int length = BossListing[client].Length;
+							for(int i; i < length; i++)
+							{
+								if(BossListing[client].Get(i) < 0)
+								{
+									UpdateDataBase[client] = true;
+									BossListing[client].Erase(i);
+									i--;
+									length--;
+								}
+							}
+						}
+					}
+					case -2:
+					{
+						if(!BossListing[client])
+							BossListing[client] = new ArrayList();
+						
+						int length = Bosses_GetCharsetLength();
+						for(int i; i < length; i++)
+						{
+							if(Bosses_IsCharsetSideLoaded(i))
+								continue;
+							
+							int index = -(i+1);
+							if(BossListing[client].FindValue(index) == -1)
+							{
+								UpdateDataBase[client] = true;
+								BossListing[client].Push(index);
+							}
+						}
+					}
+					case -1:
+					{
+						if(BossListing[client])
+						{
+							UpdateDataBase[client] = true;
+							delete BossListing[client];
+						}
+					}
+					default:
+					{
+						ViewingPack[client] = value;
+					}
+				}
+				
+				BossMenu(client);
+				if(value >= 0)
+					ViewingPage[client] = choice / 7 * 7;
+			}
+		}
+	}
+	return 0;
+}
+
+bool Preference_ClientDisconnect(int client)
+{
+	for(int i = 1; i <= MaxClients; i++)
+	{
+		PartyInvite[client][i] = -1;
+	}
+	
+	if(!PartyLeader[client])
+		return false;
+	
+	int newLeader;
+	char buffer[64];
+	for(int target = 1; target <= MaxClients; target++)
+	{
+		PartyInvite[target][client] = -1;
+		
+		if(target != client && PartyLeader[client] == PartyLeader[target])
+		{
+			if(PartyLeader[client] == client)
+			{
+				if(!newLeader)
+					newLeader = target;
+				
+				PartyLeader[target] = newLeader;
+			}
+			
+			if(newLeader)
+			{
+				Bosses_GetBossName(PartyChoice[client], buffer, sizeof(buffer), GetClientLanguage(target));
+				FPrintToChat(target, "%t", "Party Leader Left", client, buffer, newLeader);
+			}
+			else
+			{
+				Bosses_GetBossName(PartyChoice[client], buffer, sizeof(buffer), GetClientLanguage(target));
+				FPrintToChat(target, "%t", "Party Member Left", client, buffer);
+			}
+		}
+	}
+	
+	PartyLeader[client] = 0;
+	return true;
+}
+
+static void CreateParty(int client)
+{
+	if(PartyLeader[client] && PartyMainBoss[PartyLeader[client]] == ViewingBoss[client].Get(0))
+	{
+		PartyMenu(client);
+		return;
+	}
+	
+	Preference_ClientDisconnect(client);
+
+	if(!Forward_OnMenuPagePre(client, "party.create"))
+		return;
+	
+	Menu menu = new Menu(CreatePartyH);
+	
+	SetGlobalTransTarget(client);
+	int lang = GetClientLanguage(client);
+	
+	int special = ViewingBoss[client].Get(0);
+	
+	char data[12], buffer[64];
+	if(!Bosses_GetBossName(special, buffer, sizeof(buffer), lang, "group"))
+		Bosses_GetBossName(special, buffer, sizeof(buffer), lang);
+	
+	menu.SetTitle("%t", "Boss Party Menu", buffer);
+	
+	for(int i; i<MAXTF2PLAYERS; i++)	// In case someone made an infinite loop boss
+	{
+		ConfigMap cfg = Bosses_GetConfig(special);
+		Bosses_GetBossNameCfg(cfg, buffer, sizeof(buffer), lang);
+		
+		IntToString(special, data, sizeof(data));
+		menu.AddItem(data, buffer);
+		
+		if(!cfg.GetInt("companion", special))
+			break;
+	}
+	
+	menu.ExitBackButton = true;
+	Forward_OnMenuPagePost(client, "party.create", menu);
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+static int CreatePartyH(Menu menu, MenuAction action, int client, int choice)
+{
+	switch(action)
+	{
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+		case MenuAction_Cancel:
+		{
+			if(choice == MenuCancel_ExitBack)
+				BossMenu(client);
+		}
+		case MenuAction_Select:
+		{
+			char buffer[64];
+			menu.GetItem(choice, buffer, sizeof(buffer));
+			PartyChoice[client] = StringToInt(buffer);
+			PartyLeader[client] = client;
+			
+			menu.GetItem(0, buffer, sizeof(buffer));
+			PartyMainBoss[client] = StringToInt(buffer);
+			
+			PartyMenu(client);
+		}
+	}
+	return 0;
+}
+
+static bool PartyMenu(int client)
+{
+	if(!PartyLeader[client])
+		return InviteMenu(client);
+	
+	if(!Forward_OnMenuPagePre(client, "party.group"))
+		return false;
+	
+	Menu menu = new Menu(PartyMenuH);
+	
+	SetGlobalTransTarget(client);
+	int lang = GetClientLanguage(client);
+	
+	int special = PartyMainBoss[PartyLeader[client]];
+	
+	char data[16], buffer[128];
+	if(!Bosses_GetBossName(special, buffer, sizeof(buffer), lang, "group"))
+		Bosses_GetBossName(special, buffer, sizeof(buffer), lang);
+	
+	menu.SetTitle("%t", "Boss Party Menu", buffer);
+	
+	bool leader = PartyLeader[client] == client;
+	for(int i; i<MAXTF2PLAYERS; i++)	// In case someone made an infinite loop boss
+	{
+		ConfigMap cfg = Bosses_GetConfig(special);
+		Bosses_GetBossNameCfg(cfg, buffer, sizeof(buffer), lang);
+		
+		int target = FindPartyMember(PartyLeader[client], special);
+		if(target)
+		{
+			Format(buffer, sizeof(buffer), "%t", (leader && client != target) ? "Boss Party Kick" : "Boss Party Member", buffer, target);
+		}
+		else
+		{
+			if(leader)
+				target = FindPartyInvitee(PartyLeader[client], special);
+			
+			if(target)
+			{
+				Format(buffer, sizeof(buffer), "%t", "Boss Party Pending", buffer, target);
+			}
+			else
+			{
+				Format(buffer, sizeof(buffer), "%t", leader ? "Boss Party Invite" : "Boss Party Blank", buffer);
+			}
+		}
+		
+		IntToString(special, data, sizeof(data));
+		menu.AddItem(data, buffer, (leader && client == target) ? ITEMDRAW_DISABLED : ITEMDRAW_DEFAULT);
+		if(!cfg.GetInt("companion", special))
+			break;
+	}
+	
+	FormatEx(buffer, sizeof(buffer), "%t", "Boss Party Leave");
+	menu.AddItem("-1", buffer);
+	
+	menu.ExitBackButton = true;
+	Forward_OnMenuPagePost(client, "party.group", menu);
+	menu.Display(client, MENU_TIME_FOREVER);
+	return true;
+}
+
+static int PartyMenuH(Menu menu, MenuAction action, int client, int choice)
+{
+	switch(action)
+	{
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+		case MenuAction_Cancel:
+		{
+			if(choice == MenuCancel_ExitBack)
+				BossMenu(client);
+		}
+		case MenuAction_Select:
+		{
+			char buffer[64];
+			menu.GetItem(choice, buffer, sizeof(buffer));
+			int special = StringToInt(buffer);
+			
+			if(special == -1)
+			{
+				Preference_ClientDisconnect(client);
+				Bosses_GetBossName(PartyChoice[client], buffer, sizeof(buffer), GetClientLanguage(client));
+				FPrintToChat(client, "%t", "Party You Left", buffer);
+				BossMenu(client);
+			}
+			else if(PartyLeader[client] == client)
+			{
+				int target = FindPartyMember(PartyLeader[client], special);
+				if(target)
+				{
+					PartyLeader[target] = 0;
+					Bosses_GetBossName(PartyChoice[target], buffer, sizeof(buffer), GetClientLanguage(target));
+					FPrintToChat(target, "%t", "Party You Kicked", buffer);
+					
+					for(int other = 1; other <= MaxClients; other++)
+					{
+						if(target != other && PartyLeader[client] == PartyLeader[other])
+						{
+							Bosses_GetBossName(PartyChoice[target], buffer, sizeof(buffer), GetClientLanguage(other));
+							FPrintToChat(other, "%t", "Party Member Kicked", target, buffer);
+						}
+					}
+					
+					PartyMenu(client);
+				}
+				else
+				{
+					target = FindPartyInvitee(PartyLeader[client], special);
+					if(target)
+					{
+						PartyInvite[target][client] = -1;
+						PartyMenu(client);
+					}
+					else if(Forward_OnMenuPagePre(client, "party.invite"))
+					{
+						SetGlobalTransTarget(client);
+						
+						PartyInvite[client][client] = special;
+						
+						Menu menu2 = new Menu(PartyInviteH);
+						
+						Bosses_GetBossName(special, buffer, sizeof(buffer), GetClientLanguage(client));
+						menu2.SetTitle("%t\n ", "Boss Party Menu", buffer);
+						
+						char buffer2[16];
+						for(target = 1; target <= MaxClients; target++)
+						{
+							if(IsClientInGame(target) && CanInviteMember(client, target))
+							{
+								IntToString(GetClientUserId(target), buffer2, sizeof(buffer2));
+								GetClientName(target, buffer, sizeof(buffer));
+								menu2.AddItem(buffer2, buffer);
+							}
+						}
+						
+						if(!buffer2[0])
+							menu2.AddItem("-1", "N/A", ITEMDRAW_DISABLED);
+						
+						menu2.ExitBackButton = true;
+						Forward_OnMenuPagePost(client, "party.invite", menu2);
+						menu2.Display(client, MENU_TIME_FOREVER);
+					}
+				}
+			}
+			else if(Forward_OnMenuPagePre(client, "party.bossdesc"))
+			{
+				SetGlobalTransTarget(client);
+				
+				Menu menu2 = new Menu(PartyInviteH);
+				if(Bosses_GetBossName(special, buffer, sizeof(buffer), GetClientLanguage(client), "description"))
+				{
+					menu2.SetTitle("%t\n%s\n ", "Boss Party Menu", NULL_STRING, buffer);
+				}
+				else
+				{
+					menu2.SetTitle("%t\n%t\n ", "Boss Party Menu", NULL_STRING, "No Description");
+				}
+				
+				menu2.AddItem("-1", NULL_STRING, ITEMDRAW_NOTEXT);
+				
+				menu2.ExitBackButton = true;
+				Forward_OnMenuPagePost(client, "party.bossdesc", menu2);
+				menu2.Display(client, MENU_TIME_FOREVER);
+			}
+		}
+	}
+	return 0;
+}
+
+static int PartyInviteH(Menu menu, MenuAction action, int client, int choice)
+{
+	switch(action)
+	{
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+		case MenuAction_Cancel:
+		{
+			if(choice == MenuCancel_ExitBack)
+				PartyMenu(client);
+		}
+		case MenuAction_Select:
+		{
+			char buffer[64];
+			menu.GetItem(choice, buffer, sizeof(buffer));
+			
+			int target = GetClientOfUserId(StringToInt(buffer));
+			if(target && CanInviteMember(client, target))
+			{
+				if(IsFakeClient(target))
+				{
+					PartyLeader[target] = client;
+					PartyChoice[target] = PartyInvite[client][client];
+					
+					for(int other = 1; other <= MaxClients; other++)
+					{
+						if(target != other && PartyLeader[other] == client)
+						{
+							Bosses_GetBossName(PartyChoice[target], buffer, sizeof(buffer), GetClientLanguage(other));
+							FPrintToChat(other, "%t", "Party Member Joined", target, buffer);
+						}
+					}
+				}
+				else
+				{
+					PartyInvite[target][client] = PartyInvite[client][client];
+					
+					Bosses_GetBossName(PartyInvite[client][client], buffer, sizeof(buffer), GetClientLanguage(target));
+					FPrintToChat(target, "%t", "Party Member Invited", client, buffer);
+				}
+			}
+			else
+			{
+				FPrintToChat(client, "%t", "Player no longer available");
+			}
+			
+			PartyMenu(client);
+		}
+	}
+	return 0;
+}
+
+static bool InviteMenu(int client)
+{
+	for(int target = 1; target <= MaxClients; target++)
+	{
+		if(client != target && PartyInvite[client][target] != -1)
+		{
+			if(!Forward_OnMenuPagePre(client, "party.invitation"))
+				return false;
+			
+			Menu menu = new Menu(InviteMenuH);
+			
+			SetGlobalTransTarget(client);
+			int lang = GetClientLanguage(client);
+			
+			int special = PartyMainBoss[PartyLeader[client]];
+			
+			char buffer1[64], buffer2[128];
+			if(!Bosses_GetBossName(special, buffer1, sizeof(buffer1), lang, "group"))
+				Bosses_GetBossName(special, buffer1, sizeof(buffer1), lang);
+			
+			Bosses_GetBossName(PartyInvite[client][target], buffer2, sizeof(buffer2), lang);
+			
+			menu.SetTitle("%t%t", "Boss Party Menu", buffer1, "Boss Party Invited", target, buffer2);
+			
+			IntToString(GetClientUserId(target), buffer2, sizeof(buffer2));
+			FormatEx(buffer1, sizeof(buffer1), "%t", "Boss Party Accept");
+			menu.AddItem(buffer2, buffer1);
+			
+			FormatEx(buffer1, sizeof(buffer1), "%t", "Boss Party Decline");
+			menu.AddItem(buffer2, buffer1);
+			
+			FormatEx(buffer1, sizeof(buffer1), "%t", "Boss Party Block");
+			menu.AddItem(buffer2, buffer1, ITEMDRAW_DISABLED);
+			
+			Forward_OnMenuPagePost(client, "party.invitation", menu);
+			menu.Display(client, MENU_TIME_FOREVER);
+			return true;
+		}
+	}
+	return false;
+}
+
+static int InviteMenuH(Menu menu, MenuAction action, int client, int choice)
+{
+	switch(action)
+	{
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+		case MenuAction_Cancel:
+		{
+			if(choice == MenuCancel_Exit)
+				BossMenu(client);
+		}
+		case MenuAction_Select:
+		{
+			char buffer[64];
+			menu.GetItem(choice, buffer, sizeof(buffer));
+			
+			int target = GetClientOfUserId(StringToInt(buffer));
+			if(target && PartyLeader[target] == target && PartyInvite[client][target] != -1)
+			{
+				if(choice)
+				{
+					Bosses_GetBossName(PartyInvite[client][target], buffer, sizeof(buffer), GetClientLanguage(target));
+					FPrintToChat(target, "%t", "Party Member Left", client, buffer);
+					
+					PartyInvite[client][target] = -1;
+				}
+				else
+				{
+					PartyLeader[client] = target;
+					PartyChoice[client] = PartyInvite[client][target];
+					PartyInvite[client][target] = -1;
+					
+					for(int other = 1; other <= MaxClients; other++)
+					{
+						if(PartyInvite[client][other] != -1)
+						{
+							Bosses_GetBossName(PartyInvite[client][other], buffer, sizeof(buffer), GetClientLanguage(other));
+							FPrintToChat(other, "%t", "Party Member Left", client, buffer);
+							
+							PartyInvite[client][other] = -1;
+						}
+						else if(client != other && PartyLeader[other] == target)
+						{
+							Bosses_GetBossName(PartyChoice[client], buffer, sizeof(buffer), GetClientLanguage(other));
+							FPrintToChat(other, "%t", "Party Member Joined", client, buffer);
+						}
+					}
+				}
+			}
+			else if(!choice)
+			{
+				FPrintToChat(client, "%t", "Player no longer available");
+			}
+			
+			if(!PartyMenu(client))
+				BossMenu(client);
+		}
+	}
+	return 0;
+}
+
+static int FindPartyMember(int leader, int special)
+{
+	for(int client = 1; client <= MaxClients; client++)
+	{
+		if(PartyLeader[client] == leader && PartyChoice[client] == special)
+			return client;
+	}
+	return 0;
+}
+
+static int FindPartyInvitee(int leader, int special)
+{
+	for(int client = 1; client <= MaxClients; client++)
+	{
+		if(leader != client && PartyInvite[client][leader] == special)
+			return client;
+	}
+	return 0;
+}
+
+static bool CanInviteMember(int client, int target)
+{
+	// If they are already in a party or has an invite
+	if(PartyLeader[target] || PartyInvite[target][client] != -1)
+		return false;
+	
+	// If they have the client muted
+	if(IsClientMuted(target, client))
+		return false;
+	
+	// If their spectating
+	if(GetClientTeam(target) <= TFTeam_Spectator && !IsPlayerAlive(target))
+		return false;
+	
+	return true;
+}
+
+int Preference_IsInParty(int client)
+{
+	return PartyLeader[client];
+}
+
+void Preference_FinishParty(int client)
+{
+	PartyLeader[client] = 0;
+	Client(client).Queue = 0;
+}
+
+int Preference_GetCompanion(int client, int special, int team, int &consume, int leader)
+{
+	if(Enabled && PartyLeader[client])
+	{
+		int player = FindPartyMember(PartyLeader[client], special);
+		if(player && !Client(player).IsBoss)
+		{
+			consume = 2;
+			return player;
+		}
+	}
+
+	int leadSpecial = special;
+	Client(leader).Cfg.GetInt("special", leadSpecial);
+	
+	int size, total;
+	int[][] queue = new int[MaxClients][2];
+	int[] players = new int[MaxClients];
+	for(int player = 1; player <= MaxClients; player++)
+	{
+		if(player != client && IsClientInGame(player) && !Client(player).IsBoss)
+		{
+			if(Enabled)
+			{
+				if(GetClientTeam(player) <= TFTeam_Spectator && !IsPlayerAlive(player))
+					continue;
+			}
+			else if(GetClientTeam(player) != team)
+			{
+				continue;
+			}
+
+			players[total++] = player;
+
+			if(!Enabled || Preference_DisabledBoss(player, Charset) || !Preference_HasWhitelisted(player, leadSpecial))
+				continue;
+			
+			queue[size][1] = Client(player).Queue;
+			queue[size++][0] = player;
+		}
+	}
+	
+	if(total < (Enabled ? 2 : 1))	// Prevent arena mode softlock when one-sided
+		return 0;
+
+	if(size > 0)
+	{
+		if(size > 1)
+			SortCustom2D(queue, size, Preference_BossQueueSort);
+
+		consume = 1;
+		return queue[0][0];
+	}
+	
+	consume = 0;
+	return players[GetURandomInt() % total];
+}
+
+// If the player has whitelisted (or not blacklisted) this boss
+bool Preference_HasWhitelisted(int client, int special, bool rules = true)
+{
+	if(!rules)
+		return (BossListing[client] && BossListing[client].FindValue(special) != -1);
+	
+	int blacklist = Cvar[PrefBlacklist].IntValue;
+	if(BossListing[client] && blacklist != 0)
+	{
+		if(BossListing[client].FindValue(special) == -1)
+		{
+			// Not found
+			return blacklist > 0;
+		}
+		else
+		{
+			// Found
+			return blacklist < 0;
+		}
+	}
+
+	return true;
+}
+
+int Preference_GetFullQueuePoints(int client)
+{
+	int queue = Client(client).Queue;
+	
+	if(PartyLeader[client])
+	{
+		for(int target = 1; target <= MaxClients; target++)
+		{
+			if(client != target && PartyLeader[client] == PartyLeader[target])
+				queue += Client(target).Queue;
+		}
+		
+		int special = PartyMainBoss[PartyLeader[client]];
+		
+		int i = 1;
+		while(Bosses_GetConfig(special).GetInt("companion", special))
+		{
+			if(++i > MAXTF2PLAYERS)
+				break;
+		}
+		
+		if(i > 1)
+			queue = queue * 6 / i / 5;
+	}
+	
+	return queue;
+}
+
+int Preference_GetBossQueue(int[] players, int maxsize, int type, int team = -1)
+{
+	int size;
+	int[][] queue = new int[MaxClients][2];
+	for(int client = 1; client <= MaxClients; client++)
+	{
+		if(!Client(client).IsBoss && IsClientInGame(client))
+		{
+			if(team == -1)
+			{
+				if(GetClientTeam(client) <= TFTeam_Spectator && !IsPlayerAlive(client))
+					continue;
+			}
+			else if(GetClientTeam(client) != team)
+			{
+				continue;
+			}
+			
+			if(type != 2)
+			{
+				if(PartyLeader[client])
+				{
+					if(!type && PartyMainBoss[PartyLeader[client]] != PartyChoice[client])
+						continue;
+				}
+				else if(!Preference_ValidBossSelection(client, team))
+				{
+					continue;
+				}
+			}
+			
+			queue[size][1] = Preference_GetFullQueuePoints(client);
+			queue[size++][0] = client;
+		}
+	}
+	
+	SortCustom2D(queue, size, Preference_BossQueueSort);
+	
+	if(size > maxsize)
+		size = maxsize;
+	
+	for(int i; i < size; i++)
+	{
+		players[i] = queue[i][0];
+	}
+	return size;
+}
+
+static int Preference_BossQueueSort(int[] elem1, int[] elem2, const int[][] array, Handle hndl)
+{
+	if(elem1[1] > elem2[1])
+		return -1;
+	
+	if(elem1[1] < elem2[1])
+		return 1;
+	
+	return (elem1[0] > elem2[0]) ? 1 : -1;
+}
+
+static Action Preference_ForceBossCmd(int client, int args)
+{
+	if(args)
+	{
+		char name[64];
+		GetCmdArgString(name, sizeof(name));
+		
+		SetGlobalTransTarget(client);
+		int lang = client ? GetClientLanguage(client) : GetServerLanguage();
+		
+		int special = -1;
+		if(name[0] == '#')
+		{
+			special = StringToInt(name[1]);
+		}
+		else
+		{
+			special = Bosses_GetByName(name, false, _, lang);
+		}
+
+		bool rcon = !client || CheckCommandAccess(client, "sm_rcon", ADMFLAG_RCON);
+		
+		if(special == -1)
+		{
+			FReplyToCommand(client, "%t", "Boss Not Found");
+		}
+		else if(rcon || Preference_CanAccessBoss(client, special, PREF_ENABLED))
+		{
+			BossOverride = special;
+			Bosses_GetBossName(special, name, sizeof(name), lang);
+			FReplyToCommand(client, "%t", "Boss Overriden", name);
+		}
+		else
+		{
+			Bosses_GetBossName(special, name, sizeof(name), lang);
+			FReplyToCommand(client, "%t", "Boss No Access", name);
+		}
+	}
+	else if(client)
+	{
+		ForceBossMenu(client, 0);
+	}
+	else if(BossOverride != -1)
+	{
+		BossOverride = -1;
+		FReplyToCommand(client, "%t", "No Boss Overriden");
+	}
+	else
+	{
+		PrintToServer("[SM] Usage: ff2_special <name / #index>");
+	}
+	return Plugin_Handled;
+}
+
+static void ForceBossMenu(int client, int item)
+{
+	if(!Forward_OnMenuPagePre(client, "admin.forceboss"))
+		return;
+	
+	Menu menu = new Menu(ForceBossMenuH);
+	
+	SetGlobalTransTarget(client);
+	menu.SetTitle("%t", "Boss Override Command");
+	
+	char name[64];
+	FormatEx(name, sizeof(name), "%t", "No Override");
+	menu.AddItem("-1", name, BossOverride == -1 ? ITEMDRAW_DISABLED : ITEMDRAW_DEFAULT);
+	
+	char num[12];
+	int lang = GetClientLanguage(client);
+	int length = Bosses_GetConfigLength();
+	bool rcon = CheckCommandAccess(client, "sm_rcon", ADMFLAG_RCON);
+	for(int i; i < length; i++)
+	{
+		if(rcon || Preference_CanAccessBoss(client, i, PREF_ENABLED))
+		{
+			IntToString(i, num, sizeof(num));
+			Bosses_GetBossName(i, name, sizeof(name), lang);
+			menu.AddItem(num, name, BossOverride == i ? ITEMDRAW_DISABLED : ITEMDRAW_DEFAULT);
+		}
+	}
+	
+	Forward_OnMenuPagePost(client, "admin.forceboss", menu);
+	menu.DisplayAt(client, item/7*7, MENU_TIME_FOREVER);
+}
+
+static int ForceBossMenuH(Menu menu, MenuAction action, int client, int choice)
+{
+	switch(action)
+	{
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+		case MenuAction_Cancel:
+		{
+			if(choice == MenuCancel_ExitBack)
+				Menu_MainMenu(client);
+		}
+		case MenuAction_Select:
+		{
+			char buffer[12];
+			menu.GetItem(choice, buffer, sizeof(buffer));
+			BossOverride = StringToInt(buffer);
+			
+			ForceBossMenu(client, choice);
+		}
+	}
+	return 0;
+}
+
+static int GetBlacklistCount(int client, int charset)
+{
+	int count = 0;
+	if(BossListing[client])
+	{
+		int value;
+		int length = BossListing[client].Length;
+		for(int i; i < length; i++)
+		{
+			ConfigMap cfg = Bosses_GetConfig(BossListing[client].Get(i));
+			if(cfg && cfg.GetInt("charset", value) && value == charset)
+				count++;
+		}
+	}
+	return count;
+}
+
+static void Preference_DisplayBosses(DataPack pack)
+{
+	pack.Reset();
+	int client = GetClientOfUserId(pack.ReadCell());
+	if(client)
+	{
+		int index = pack.ReadCell();
+		ConfigMap cfg = Bosses_GetConfig(index);
+		if(cfg)
+		{
+			char buffer[64];
+			Bosses_GetBossNameCfg(cfg, buffer, sizeof(buffer), GetClientLanguage(client));
+			PrintToConsole(client, "#%d %s", index, buffer);
+			
+			pack.Position--;
+			pack.WriteCell(index+1, false);
+			RequestFrame(Preference_DisplayBosses, pack);
+			return;
+		}
+	}
+	
+	delete pack;
+}
+
+void Preference_ApplyDifficulty(int client, int leader, bool delay)
+{
+	if(Preference_HasDifficulties())
+	{
+		char choosen[64];
+		if(!delay && DiffOverride[client][0])
+		{
+			strcopy(choosen, sizeof(choosen), DiffOverride[client]);
+			DiffOverride[client][0] = 0;
+		}
+		else if(Cvar[PrefSpecial].BoolValue && Cvar[PrefSpecial].FloatValue >= GetURandomFloat())
+		{
+			if(!DiffListing[leader])
+			{
+				StringMapSnapshot snap = Difficulties.Snapshot();
+				
+				snap.GetKey((GetTime() + leader) % snap.Length, choosen, sizeof(choosen));
+				
+				delete snap;
+			}
+		}
+		else if(DiffListing[leader])
+		{
+			int lengt = DiffListing[leader].Length;
+			if(lengt)
+				DiffListing[leader].GetString((GetTime() + leader) % lengt, choosen, sizeof(choosen));
+		}
+		
+		if(choosen[0])
+		{
+			if(delay)
+			{
+				strcopy(DiffOverride[client], sizeof(DiffOverride[]), choosen);
+			}
+			else
+			{
+				ConfigMap cfg = Difficulties.GetSection(choosen);
+				if(cfg)
+				{
+					char buffer1[128];
+					StringMapSnapshot snap = cfg.Snapshot();
+					
+					PackVal val;
+					int entries = snap.Length;
+					for(int i; i < entries; i++)
+					{
+						int length = snap.KeyBufferSize(i)+5;
+						char[] section = new char[length];
+						snap.GetKey(i, section, length);
+						if(cfg.GetArray(section, val, sizeof(val)) && val.tag == KeyValType_Section && val.cfg)
+						{
+							Format(section, length, "%s.smx", section);
+							
+							length = -2;
+							
+							Handle iterator = GetPluginIterator();
+							
+							while(MorePlugins(iterator))
+							{
+								Handle plugin = ReadPlugin(iterator);
+								GetPluginFilename(plugin, buffer1, sizeof(buffer1));
+								if(StrContains(buffer1, section, false) != -1)
+								{
+									Function func = GetFunctionByName(plugin, "FF2R_OnBossModifier");
+									if(func != INVALID_FUNCTION)
+									{
+										Call_StartFunction(plugin, func);
+										Call_PushCell(client);
+										Call_PushCell(val.cfg);
+										length = Call_Finish();
+									}
+									else
+									{
+										length = -1;
+									}
+									break;
+								}
+							}
+							
+							delete iterator;
+							
+							switch(length)
+							{
+								case -2:
+									LogError("[Modifier] Plugin '%s' is missing for '%s'", section, choosen);
+								
+								case -1:
+									LogError("[Modifier] Plugin '%s' is does not have modifiers for '%s'", section, choosen);
+							}
+						}
+					}
+					
+					delete snap;
+					
+					// Set "name_X" and "group_X" for any present on the boss
+					snap = Client(client).Cfg.Snapshot();
+					
+					char buffer2[64], buffer3[64], buffer4[64];
+					entries = snap.Length;
+					for(int i; i < entries; i++)
+					{
+						snap.GetKey(i, buffer3, sizeof(buffer3));
+						if((!StrContains(buffer3, "name_") || !StrContains(buffer3, "group_")) && Client(client).Cfg.Get(buffer3, buffer2, sizeof(buffer2)))
+						{
+							strcopy(buffer4, sizeof(buffer4), buffer3);
+							ReplaceStringEx(buffer4, sizeof(buffer4), "group_", "name_");
+							if(!cfg.Get(buffer4, buffer1, sizeof(buffer1)))
+							{
+								if(!cfg.Get("name", buffer1, sizeof(buffer1)))
+									strcopy(buffer1, sizeof(buffer1), choosen);
+							}
+							
+							Format(buffer2, sizeof(buffer2), "%s [%s]", buffer2, buffer1);
+							Client(client).Cfg.Set(buffer3, buffer2);
+						}
+					}
+					
+					delete snap;
+					
+					snap = cfg.Snapshot();
+					
+					entries = snap.Length;
+					for(int i; i < entries; i++)
+					{
+						snap.GetKey(i, buffer3, sizeof(buffer3));
+						if(!StrContains(buffer3, "name_") && cfg.Get(buffer3, buffer2, sizeof(buffer2)))
+						{
+							// Set "name_X" for any present on the diff but not on the boss
+							if(!Client(client).Cfg.Get(buffer3, buffer1, sizeof(buffer1)))
+							{
+								Client(client).Cfg.Get("name", buffer1, sizeof(buffer1));
+								Format(buffer2, sizeof(buffer2), "%s [%s]", buffer1, buffer2);
+								Client(client).Cfg.Set(buffer3, buffer2);
+							}
+							
+							// Set "group_X" for any present on the diff but not on the boss but has a group
+							if(ReplaceStringEx(buffer3, sizeof(buffer3), "name_", "group_") != -1 && !Client(client).Cfg.Get(buffer3, buffer1, sizeof(buffer1)) && Client(client).Cfg.Get("group", buffer1, sizeof(buffer1)))
+							{
+								Format(buffer2, sizeof(buffer2), "%s [%s]", buffer1, buffer2);
+								Client(client).Cfg.Set(buffer3, buffer2);
+							}
+						}
+					}
+					
+					delete snap;
+					
+					// Set "name"
+					Client(client).Cfg.Get("name", buffer1, sizeof(buffer1));
+					if(cfg.Get("name", buffer2, sizeof(buffer2)))
+					{
+						Format(buffer2, sizeof(buffer2), "%s [%s]", buffer1, buffer2);
+					}
+					else
+					{
+						Format(buffer2, sizeof(buffer2), "%s [%s]", buffer1, choosen);
+					}
+					
+					Client(client).Cfg.Set("name", buffer2);
+					
+					// Set "group"
+					if(Client(client).Cfg.Get("group", buffer1, sizeof(buffer1)))
+					{
+						if(cfg.Get("name", buffer2, sizeof(buffer2)))
+						{
+							Format(buffer2, sizeof(buffer2), "%s [%s]", buffer1, buffer2);
+						}
+						else
+						{
+							Format(buffer2, sizeof(buffer2), "%s [%s]", buffer1, choosen);
+						}
+						
+						Client(client).Cfg.Set("group", buffer2);
+					}
+				}
+			}
+		}
+	}
+}
+
+bool Preference_HasDifficulties()
+{
+	return view_as<bool>(Difficulties);
+}
+
+static Action Preference_DifficultyMenuCmd(int client, int args)
+{
+	if(!Preference_HasDifficulties())
+		return Plugin_Continue;
+	
+	if(GetCmdReplySource() == SM_REPLY_TO_CONSOLE)
+	{
+		if(Cvar[PrefSpecial].BoolValue)
+		{
+			if(DiffListing[client])
+			{
+				delete DiffListing[client];
+				FReplyToCommand(client, "%t", "Enabled Special Rounds");
+			}
+			else
+			{
+				Preference_AddDifficulty(client, "#");
+				FReplyToCommand(client, "%t", "Disabled Special Rounds");
+			}
+			
+			UpdateDataBase[client] = true;
+		}
+		else if(args && client)
+		{
+			int lang = GetClientLanguage(client);
+			
+			char buffer[64];
+			GetCmdArgString(buffer, sizeof(buffer));
+			if(GetDiffByName(buffer, buffer, sizeof(buffer), lang))
+			{
+				int index = -1;
+				if(DiffListing[client])
+					index = DiffListing[client].FindString(buffer);
+				
+				ConfigMap cfg = Difficulties.GetSection(buffer);
+				if(!cfg)
+				{
+					FReplyToCommand(client, "%t", "Unknown Difficulty");
+				}
+				else if(index == -1)
+				{
+					Preference_AddDifficulty(client, buffer);
+					UpdateDataBase[client] = true;
+					
+					Bosses_GetBossNameCfg(cfg, buffer, sizeof(buffer), lang);
+					FReplyToCommand(client, "%t", "Boss Whitelisted", buffer);
+				}
+				else
+				{
+					DiffListing[client].Erase(index);
+					UpdateDataBase[client] = true;
+					
+					Bosses_GetBossNameCfg(cfg, buffer, sizeof(buffer), lang);
+					FReplyToCommand(client, "%t", "Boss Blacklisted", buffer);
+				}
+			}
+			else
+			{
+				FReplyToCommand(client, "%t", "Unknown Difficulty");
+			}
+		}
+		else
+		{
+			char buffer[64];
+			int lang = client ? GetClientLanguage(client) : -1;
+			SortedSnapshot snap = CreateSortedSnapshot(Difficulties);
+			
+			PackVal val;
+			int entries = snap.Length;
+			for(int i; i < entries; i++)
+			{
+				int length = snap.KeyBufferSize(i)+1;
+				char[] section = new char[length];
+				snap.GetKey(i, section, length);
+				if(Difficulties.GetArray(section, val, sizeof(val)) && val.tag == KeyValType_Section && val.cfg)
+				{
+					if(!client)
+					{
+						PrintToServer(section);
+					}
+					else if(Bosses_GetBossNameCfg(val.cfg, buffer, sizeof(buffer), lang))
+					{
+						PrintToConsole(client, buffer);
+					}
+					else
+					{
+						PrintToConsole(client, section);
+					}
+				}
+			}
+			
+			delete snap;
+		}
+	}
+	else if(args)
+	{
+		Menu_Command(client);
+		
+		char buffer[64];
+		GetCmdArgString(buffer, sizeof(buffer));
+		if(GetDiffByName(buffer, buffer, sizeof(buffer), GetClientLanguage(client)))
+		{
+			ViewingPage[client] = 0;
+			DifficultyMenu(client, buffer);
+		}
+		else
+		{
+			Preference_DifficultyMenu(client);
+		}
+	}
+	else
+	{
+		Menu_Command(client);
+		Preference_DifficultyMenu(client);
+	}
+	return Plugin_Handled;
+}
+
+void Preference_DifficultyMenu(int client)
+{
+	ViewingPage[client] = 0;
+	DifficultyMenu(client);
+}
+
+static void DifficultyMenu(int client, const char[] name = NULL_STRING)
+{
+	SetGlobalTransTarget(client);
+	
+	if(name[0])
+	{
+		ConfigMap cfg = Difficulties.GetSection(name);
+		if(cfg && Forward_OnMenuPagePre(client, "difficulty.item"))
+		{
+			Menu menu = new Menu(DifficultyMenuItemH);
+			
+			int lang = GetClientLanguage(client);
+			
+			char buffer[512];
+			if(Bosses_GetBossNameCfg(cfg, buffer, sizeof(buffer), lang, "description"))
+			{
+				menu.SetTitle("%t\n%s\n ", "Difficulty Menu", buffer);
+			}
+			else
+			{
+				menu.SetTitle("%t\n%t\n ", "Difficulty Menu", "No Description");
+			}
+			
+			if(Cvar[PrefSpecial].BoolValue)
+			{
+				menu.AddItem(NULL_STRING, NULL_STRING, ITEMDRAW_NOTEXT);
+			}
+			else
+			{
+				if(!Bosses_GetBossNameCfg(cfg, buffer, sizeof(buffer), lang))
+					strcopy(buffer, sizeof(buffer), name);
+				
+				Format(buffer, sizeof(buffer), "%t", (DiffListing[client] && DiffListing[client].FindString(name) != -1) ? "Boss Blacklist" : "Boss Whitelist", buffer);
+				menu.AddItem(name, buffer);
+			}
+			
+			menu.ExitBackButton = true;
+			Forward_OnMenuPagePost(client, "difficulty.item", menu);
+			menu.Display(client, MENU_TIME_FOREVER);
+		}
+	}
+	else if(Forward_OnMenuPagePre(client, "difficulty.main"))
+	{
+		Menu menu = new Menu(DifficultyMenuH);
+		
+		menu.SetTitle("%t", "Difficulty Menu");
+		
+		bool random = Cvar[PrefSpecial].BoolValue;
+		char buffer[64];
+		if(random)
+		{
+			FormatEx(buffer, sizeof(buffer), "%t\n ", DiffListing[client] ? "Enable Special Rounds" : "Disable Special Rounds");
+			menu.AddItem(NULL_STRING, buffer);
+		}
+		else
+		{
+			FormatEx(buffer, sizeof(buffer), "%t", "Clear Whitelist");
+			menu.AddItem(NULL_STRING, buffer, DiffListing[client] ? ITEMDRAW_DEFAULT : ITEMDRAW_DISABLED);
+		}
+		
+		int lang = GetClientLanguage(client);
+		SortedSnapshot snap = CreateSortedSnapshot(Difficulties);
+		
+		PackVal val;
+		int entries = snap.Length;
+		for(int i; i < entries; i++)
+		{
+			int length = snap.KeyBufferSize(i)+1;
+			char[] section = new char[length];
+			snap.GetKey(i, section, length);
+			if(Difficulties.GetArray(section, val, sizeof(val)) && val.tag == KeyValType_Section && val.cfg)
+			{
+				if(!Bosses_GetBossNameCfg(val.cfg, buffer, sizeof(buffer), lang))
+					strcopy(buffer, sizeof(buffer), section);
+				
+				if(!random)
+					Format(buffer, sizeof(buffer), "[%s] %s", (DiffListing[client] && DiffListing[client].FindString(section) != -1) ? "X" : " ", buffer);
+				
+				menu.AddItem(section, buffer);
+			}
+		}
+		
+		delete snap;
+		
+		menu.ExitBackButton = Menu_BackButton(client);
+		Forward_OnMenuPagePost(client, "difficulty.main", menu);
+		menu.DisplayAt(client, ViewingPage[client], MENU_TIME_FOREVER);
+	}
+}
+
+static int DifficultyMenuH(Menu menu, MenuAction action, int client, int choice)
+{
+	switch(action)
+	{
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+		case MenuAction_Cancel:
+		{
+			if(choice == MenuCancel_ExitBack)
+				Menu_MainMenu(client);
+		}
+		case MenuAction_Select:
+		{
+			ViewingPage[client] = choice / 7 * 7;
+			
+			if(choice)
+			{
+				char buffer[64];
+				menu.GetItem(choice, buffer, sizeof(buffer));
+				DifficultyMenu(client, buffer);
+			}
+			else if(DiffListing[client])
+			{
+				delete DiffListing[client];
+				UpdateDataBase[client] = true;
+				DifficultyMenu(client);
+			}
+			else
+			{
+				Preference_AddDifficulty(client, "#");
+				UpdateDataBase[client] = true;
+				DifficultyMenu(client);
+			}
+		}
+	}
+	return 0;
+}
+
+static int DifficultyMenuItemH(Menu menu, MenuAction action, int client, int choice)
+{
+	switch(action)
+	{
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+		case MenuAction_Cancel:
+		{
+			if(choice == MenuCancel_ExitBack)
+				DifficultyMenu(client);
+		}
+		case MenuAction_Select:
+		{
+			char buffer[64];
+			menu.GetItem(choice, buffer, sizeof(buffer));
+			if(buffer[0])
+			{
+				int index = -1;
+				if(DiffListing[client])
+					index = DiffListing[client].FindString(buffer);
+				
+				if(index == -1)
+				{
+					Preference_AddDifficulty(client, buffer);
+				}
+				else
+				{
+					DiffListing[client].Erase(index);
+				}
+				
+				UpdateDataBase[client] = true;
+			}
+			
+			DifficultyMenu(client);
+		}
+	}
+	return 0;
+}
+
+static bool GetDiffByName(const char[] name, char[] buffer, int length, int lang = -1)
+{
+	int similarDiff = -1;
+	int size1 = strlen(name);
+	int similarChars;
+	
+	StringMapSnapshot snap = Difficulties.Snapshot();
+	
+	PackVal val;
+	int entries = snap.Length;
+	for(int i; i < entries; i++)
+	{
+		int lengt = snap.KeyBufferSize(i)+1;
+		char[] section = new char[lengt];
+		snap.GetKey(i, section, lengt);
+		if(Difficulties.GetArray(section, val, sizeof(val)) && val.tag == KeyValType_Section && val.cfg)
+		{
+			if(!Bosses_GetBossNameCfg(val.cfg, buffer, length, lang))
+				strcopy(buffer, length, section);
+			
+			if(StrEqual(name, buffer, false))
+			{
+				similarDiff = i;
+				break;
+			}
+			
+			int bump = StrContains(buffer, name, false);
+			if(bump == -1)
+				bump = 0;
+			
+			int size2 = strlen(buffer) - bump;
+			if(size2 > size1)
+				size2 = size1;
+			
+			int amount;
+			for(int c; c < size2; c++)
+			{
+				if(CharToLower(name[c]) == CharToLower(buffer[c + bump]))
+					amount++;
+			}
+			
+			if(amount > similarChars)
+			{
+				similarChars = amount;
+				similarDiff = i;
+			}
+		}
+	}
+	
+	if(similarDiff != -1)
+		snap.GetKey(similarDiff, buffer, length);
+	
+	delete snap;
+	return similarDiff != -1;
+}
+
+static void CreatorMenu(int client)
+{
+	if(!Forward_OnMenuPagePre(client, "preference.creator"))
+		return;
+	
+	ConfigMap cfg = Bosses_GetConfig(ViewingBoss[client].Get(0));
+	if(!cfg)
+		return;
+
+	Menu menu = new Menu(CreatorMenuH);
+
+	SetGlobalTransTarget(client);
+	int lang = GetClientLanguage(client);
+
+	char buffer1[64], buffer2[64];
+	if(!Bosses_GetBossNameCfg(cfg, buffer1, sizeof(buffer1), lang, "group"))
+		Bosses_GetBossNameCfg(cfg, buffer1, sizeof(buffer1), lang);
+	
+	if(ViewingPack[client] >= 0)
+	{
+		Bosses_GetCharsetName(ViewingPack[client], buffer2, sizeof(buffer2), lang);
+		menu.SetTitle("%t%s\n %s\n %t\n ", "Boss Selection Command", buffer2, buffer1, "Created By");
+	}
+	else
+	{
+		menu.SetTitle("%t%s\n %t\n ", "Boss Selection Command", buffer1, "Created By");
+	}
+
+	cfg = cfg.GetSection("creator");
+	if(cfg)
+	{
+		SortedSnapshot snap = CreateSortedSnapshot(cfg);
+
+		int entries = snap.Length;
+		for(int i; i < entries; i++)
+		{
+			snap.GetKey(i, buffer1, sizeof(buffer1));
+			cfg.Get(buffer1, buffer2, sizeof(buffer2));
+			menu.AddItem(buffer2, buffer1, buffer2[0] ? ITEMDRAW_DEFAULT : ITEMDRAW_DISABLED);
+		}
+
+		delete snap;
+	}
+
+	menu.ExitBackButton = true;
+	Forward_OnMenuPagePost(client, "preference.creator", menu);
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+static int CreatorMenuH(Menu menu, MenuAction action, int client, int choice)
+{
+	switch(action)
+	{
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+		case MenuAction_Cancel:
+		{
+			if(choice == MenuCancel_ExitBack)
+				BossMenu(client);
+		}
+		case MenuAction_Select:
+		{
+			char buffer[64];
+			menu.GetItem(choice, buffer, sizeof(buffer));
+
+			if(buffer[0])
+			{
+				DataPack pack = new DataPack();
+				pack.WriteString(buffer);
+				QueryClientConVar(client, "cl_disablehtmlmotd", CreatorPageQuery, pack);
+			}
+
+			CreatorMenu(client);
+		}
+	}
+	return 0;
+}
+
+static void CreatorPageQuery(QueryCookie cookie, int client, ConVarQueryResult result, const char[] cvarName, const char[] cvarValue, any value)
+{
+	char buffer[PLATFORM_MAX_PATH];
+
+	ResetPack(value);
+	ReadPackString(value, buffer, sizeof(buffer));
+	CloseHandle(value);
+
+	Format(buffer, sizeof(buffer), "https://steamcommunity.com/profiles/%s", buffer);
+	
+	if(result == ConVarQuery_Okay && !StringToInt(cvarValue))
+	{
+		KeyValues kv = new KeyValues("data");
+		kv.SetString("title", "Creator Steam Profile");
+		kv.SetString("msg", buffer);
+		kv.SetNum("customsvr", 1);
+		kv.SetNum("type", MOTDPANEL_TYPE_URL);
+		ShowVGUIPanel(client, "info", kv, true);
+		delete kv;
+	}
+	else
+	{
+		PrintToChat(client, buffer);
+	}
+}

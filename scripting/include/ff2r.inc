@@ -10,6 +10,14 @@
 
 #define SNDVOL_BOSS	2.0
 
+enum struct FF2RMusicInfo
+{
+	char path[PLATFORM_MAX_PATH];
+	float duration;
+	char name[64];
+	char artist[64];
+}
+
 /**
  * Activates a range of abilities within slots
  * 
@@ -21,7 +29,7 @@
  * 
  * @noreturn
  */
-native bool FF2R_DoBossSlot(int boss, int low, int high = -2147483647);
+native void FF2R_DoBossSlot(int boss, int low, int high = -2147483647);
 
 /**
  * Emits a boss's random sound to a list of clients.
@@ -105,32 +113,6 @@ native Handle FF2R_GetPluginHandle();
 native int FF2R_GetGamemodeType();
 
 /**
- * Calls CLagCompensationManager::StartLagCompensation
- * 
- * @note			Make sure to call FF2R_FinishLagCompensation afterwards
- * 
- * @param client	Client index
- * 
- * @error			Invalid client index or client is not in game
- * 
- * @noreturn
- */
-native void FF2R_StartLagCompensation(int client);
-
-/**
- * Calls CLagCompensationManager::FinishLagCompensation
- * 
- * @note			Make sure to call FF2R_StartLagCompensation first
- * 
- * @param client	Client index
- * 
- * @error			Invalid client index or client is not in game
- * 
- * @noreturn
- */
-native void FF2R_FinishLagCompensation(int client);
-
-/**
  * Updates max health, speed attributes, and the health bar
  * 
  * @param boss	Boss's client index
@@ -177,6 +159,50 @@ native void FF2R_SetClientHud(int client, bool status);
 native bool FF2R_ClientHasFile(int client, const char[] file);
 
 /**
+ * Gets the player's assist point in the current round
+ * 
+ * @note			Return value is not total assist.
+ * 
+ * @param client	Client index
+ * 
+ * @error			Invalid client index
+ * 
+ * @return			Assist point the player has
+ */
+native int FF2R_GetClientAssist(int client);
+
+/**
+ * Sets the player's assist point in the current round
+ * 
+ * @note			This doesn't set total assist.
+ * 
+ * @param client	Client index
+ * @param assist	Assist point to set
+ * 
+ * @error			Invalid client index
+ * 
+ * @noreturn
+ */
+native void FF2R_SetClientAssist(int client, int assist);
+
+/**
+ * Gets the current loaded bosses count.
+ * Useful for loops with FF2R_GetSpecialData.
+ *
+ * @return			Loaded bosses count
+ */
+native int FF2R_GetSpecialCount();
+
+/**
+ * Gets the player's current boss list from preferences
+ * 
+ * @note			Negative indexes mean they have disabled playing on boss pack index (-1 - X)
+ *
+ * @return			ArrayList of boss indexes, null if blank (don't close)
+ */
+native ArrayList FF2R_GetClientListing(int client);
+
+/**
  * Called when a player spawns, dies, disconnects, etc.
  * 
  * @note		Players counted as minions aren't counted
@@ -187,6 +213,7 @@ native bool FF2R_ClientHasFile(int client, const char[] file);
  * @return		Plugin_Changed if the count was changed, Plugin_Handled to also prevent lastman and control point logic, Plugin_Stop to also prevent post forwards from being called
  */
 forward Action FF2R_OnAliveChange(int alive[4], int total[4]);
+forward Action FF2R_OnAliveChange2(int[] alive, int[] total, int teams);
 
 /**
  * Called when a player spawns, dies, disconnects, etc.
@@ -199,6 +226,7 @@ forward Action FF2R_OnAliveChange(int alive[4], int total[4]);
  * @noreturn
  */
 forward void FF2R_OnAliveChanged(const int alive[4], const int total[4]);
+forward void FF2R_OnAliveChanged2(const int[] alive, const int[] total, int teams);
 
 /**
  * Called when a boss gets removed
@@ -212,12 +240,35 @@ forward void FF2R_OnAliveChanged(const int alive[4], const int total[4]);
 forward void FF2R_OnBossRemoved(int client);
 
 /**
+ * Called when a client's music starts playing, before it is emitted
+ *
+ * @note			Fires per-client each time a theme is (re)started
+ *
+ * @param client	Client index
+ * @param info		Resolved music info
+ *
+ * @return			Plugin_Continue to play as resolved, Plugin_Changed to apply edits to info, Plugin_Handled or Plugin_Stop to cancel this client's playback
+ */
+forward Action FF2R_OnMusicStart(int client, FF2RMusicInfo info);
+
+/**
+ * Called when a client's music is stopped
+ *
+ * @note			Fires per-client when a playing theme is stopped (not on track change or replay)
+ *
+ * @param client	Client index
+ *
+ * @noreturn
+ */
+forward void FF2R_OnMusicStop(int client);
+
+/**
  * Called when a player tries to pick up a dropped item
  * 
  * @param client	Client index
  * @param weapon	Entity index of dropped weapon
  * 
- * @return		Plugin_Changed to let the game decide, Plugin_Handled to allow pickup, Plugin_Stop to block pickup
+ * @return		Plugin_Changed for normal logic, Plugin_Handled for deleting the weapon, Plugin_Stop for blocking all logic
  */
 forward Action FF2R_OnPickupDroppedWeapon(int client, int weapon);
 
@@ -231,6 +282,40 @@ forward Action FF2R_OnPickupDroppedWeapon(int client, int weapon);
  */
 forward void FF2R_OnBossEquipped(int client, bool weapons);
 
+/**
+ * Called when a player's boss rank gets updated
+ * 
+ * @note			Old and new rank can be the same
+ * 
+ * @param client	Client index
+ * @param filename	Boss's filename key
+ * @param oldRank	Previous rank value
+ * @param newRank	New rank value
+ * 
+ * @noreturn
+ */
+forward void FF2R_OnRankChange(int client, const char[] filename, int oldRank, int newRank);
+
+/**
+ * Called when a player attempts to open a specific FF2 menu
+ * 
+ * @param client	Client index
+ * @param id		ID name (see source files for references)
+ * 
+ * @return		Plugin_Handled/Plugin_Stop to prevent the menu from opening
+ */
+forward Action FF2R_OnMenuOpenPre(int client, const char[] name);
+
+/**
+ * Called when a player opens a specific FF2 menu
+ * 
+ * @param client	Client index
+ * @param id		ID name (see source files for references)
+ * @param menu		Menu handle (don't close)
+ * 
+ * @noreturn
+ */
+forward void FF2R_OnMenuOpenPost(int client, const char[] name, Menu menu);
 /**
  * Wrapper to emit sound to one client.
  * 
@@ -302,6 +387,31 @@ stock bool FF2R_EmitBossSoundToAll(const char[] key, int boss, const char[] requ
 	return FF2R_EmitBossSound(clients, total, key, boss, required, entity, channel, level, flags, volume, pitch, speakerentity, origin, dir, updatePos, soundtime);
 }
 
+/**
+ *  If a client isn't specified, stops any currently playing music for all players.
+ *  If a client was specified, stops any currently playing music for that player only.
+ *  Does not play any other music after it's called. Best used with FF2R_PlayMusic(); 
+ *
+ *  @param client    Client index, 0 for all players
+ *	@noreturn
+ */
+native void FF2R_StopMusic(int client = 0);
+
+/**
+ *  Plays music for all clients or a specific client only.
+ *  If no index is given, plays the next song based on the client's current shuffle state.
+ *  If an index is given, plays that specific music from the playlist.
+ *  If shuffle is disabled, plays the next song of the current boss's bgm's.
+ *  If shuffle is enabled, plays the next song from the playlist.
+ *  Does not permanently change any player's settings.
+ *
+ *  @param client           Client index, 0 for all players
+ *  @param playlistindex    Specific playlist index to play, -1 for no specific music
+ *  @param shuffle          If true, forces shuffle for this call only
+ *  @noreturn
+ */
+native void FF2R_PlayMusic(int client = 0, int playlistindex = -1, bool shuffle = false);
+ 
 /**
  *	Below is related to using ConfigMap, though cfgmap is not required for this include, needed for the below
  */
@@ -722,7 +832,7 @@ methodmap BossData < ConfigData
 		}
 	}
 	
-	// RPS lose count
+	// Who won the RPS
 	property int RPSHit
 	{
 		public get()
@@ -735,7 +845,7 @@ methodmap BossData < ConfigData
 		}
 	}
 	
-	// First RPS damage taken
+	// Unused
 	property int RPSDamage
 	{
 		public get()
@@ -800,7 +910,7 @@ native void FF2R_SetBossData(int client, ConfigMap cfg = null, bool forwards);
  * 
  * @return			ConfigMap handle if found, null otherwise
  */
-native BossData FF2R_GetSpecialData(int client);
+native BossData FF2R_GetSpecialData(int special);
 
 /**
  * Creates or removes a boss on a player
@@ -901,11 +1011,14 @@ native bool FF2R_GetBossData(int client);
 native void FF2R_SetBossData(int client, Handle cfg = null, bool forwards);
 native bool FF2R_GetSpecialData(int special);
 native bool FF2R_CreateBoss(int client);
-forward void FF2R_OnAbility(int client, const char[] ability);
-forward void FF2R_OnAbilityPost(int client, const char[] ability);
-forward void FF2R_OnBossModifier(int client);
 
 #endif
+
+#pragma deprecated Use TF2Util_StartLagCompensation
+native void FF2R_StartLagCompensation(int client);
+
+#pragma deprecated Use TF2Util_FinishLagCompensation
+native void FF2R_FinishLagCompensation(int client);
 
 public SharedPlugin __pl_ff2r =
 {
@@ -936,6 +1049,9 @@ public void __pl_ff2r_SetNTVOptional()
 	MarkNativeAsOptional("FF2R_GetBossData");
 	MarkNativeAsOptional("FF2R_SetBossData");
 	MarkNativeAsOptional("FF2R_GetSpecialData");
+	MarkNativeAsOptional("FF2R_GetSpecialCount");
 	MarkNativeAsOptional("FF2R_CreateBoss");
+	MarkNativeAsOptional("FF2R_StopMusic");
+	MarkNativeAsOptional("FF2R_PlayMusic");
 }
 #endif

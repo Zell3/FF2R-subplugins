@@ -1,16 +1,20 @@
-#if defined IS_MAIN_FF2
+#if defined IS_MAIN_FF2 || defined CUSTOM_ATTRIBS
 #tryinclude <tf_econ_dynamic>
 #endif
+
 #tryinclude <tf_custom_attributes>
 
 #pragma semicolon 1
 #pragma newdecls required
 
+native bool CW3_AddAttribute(int slot, int client, const char[] attrib, const char[] plugin, const char[] value, bool whileActive);
+
 #define TFEY_LIBRARY	"tf2econdynamic"
 #define TCA_LIBRARY		"tf2custattr"
+#define CW3A_LIBRARY	"cw3-attributes"
 
-#if !defined DEFAULT_VALUE_TEST
-#define DEFAULT_VALUE_TEST	-69420.69
+#if !defined CUSTOMATTRIBFF2_INCLUDED
+#define CUSTOMATTRIBFF2_INCLUDED	-69420.69
 #endif
 
 #if defined __tf_econ_dyn_included
@@ -21,6 +25,10 @@ static bool TFEYLoaded;
 static bool TCALoaded;
 #endif
 
+#if defined _cw3_attributes_included_
+static bool CW3Loaded;
+#endif
+
 #if defined IS_MAIN_FF2
 static int HasCritGlow[MAXTF2PLAYERS];
 #endif
@@ -28,9 +36,13 @@ static int HasCritGlow[MAXTF2PLAYERS];
 void CustomAttrib_PluginLoad()
 {
 	#if defined __tf_custom_attributes_included
+	MarkNativeAsOptional("TF2CustAttr_SetFloat");
 	MarkNativeAsOptional("TF2CustAttr_GetFloat");
 	MarkNativeAsOptional("TF2CustAttr_SetString");
 	MarkNativeAsOptional("TF2CustAttr_GetString");
+	#endif
+	
+	#if defined __tf_econ_dyn_included
 	MarkNativeAsOptional("TF2EconDynAttribute.TF2EconDynAttribute");
 	MarkNativeAsOptional("TF2EconDynAttribute.SetClass");
 	MarkNativeAsOptional("TF2EconDynAttribute.SetName");
@@ -38,22 +50,27 @@ void CustomAttrib_PluginLoad()
 	MarkNativeAsOptional("TF2EconDynAttribute.SetCustom");
 	MarkNativeAsOptional("TF2EconDynAttribute.Register");
 	#endif
+
+	MarkNativeAsOptional("CW3_AddAttribute");
 }
 
 void CustomAttrib_PluginStart()
 {
+	#if defined __tf_custom_attributes_included
+	TCALoaded = LibraryExists(TCA_LIBRARY);
+	#endif
+	
+	#if defined _cw3_attributes_included_
+	CW3Loaded = LibraryExists(CW3A_LIBRARY);
+	#endif
+}
+
+stock void CustomAttrib_AllPluginsLoaded()
+{
 	#if defined __tf_econ_dyn_included
 	TFEYLoaded = GetFeatureStatus(FeatureType_Native, "TF2EconDynAttribute.TF2EconDynAttribute") == FeatureStatus_Available;
 	if(TFEYLoaded)
-	{
-		#if defined IS_MAIN_FF2
 		AddAttributes();
-		#endif
-	}
-	#endif
-
-	#if defined __tf_custom_attributes_included
-	TCALoaded = LibraryExists(TCA_LIBRARY);
 	#endif
 }
 
@@ -63,6 +80,11 @@ public void CustomAttrib_LibraryAdded(const char[] name)
 	if(!TCALoaded && StrEqual(name, TCA_LIBRARY))
 		TCALoaded = true;
 	#endif
+
+	#if defined _cw3_attributes_included_
+	if(!CW3Loaded && StrEqual(name, CW3A_LIBRARY))
+		CW3Loaded = true;
+	#endif
 }
 
 public void CustomAttrib_LibraryRemoved(const char[] name)
@@ -71,35 +93,18 @@ public void CustomAttrib_LibraryRemoved(const char[] name)
 	if(TCALoaded && StrEqual(name, TCA_LIBRARY))
 		TCALoaded = false;
 	#endif
-}
 
-stock bool CustomAttrib_Loaded()
-{
-	#if defined __tf_econ_dyn_included
-	if(TFEYLoaded)
-	{
-		if(GetFeatureStatus(FeatureType_Native, "TF2EconDynAttribute.TF2EconDynAttribute") != FeatureStatus_Available)
-			TFEYLoaded = false;
-		
-		if(TFEYLoaded)
-			return TFEYLoaded;
-	}
+	#if defined _cw3_attributes_included_
+	if(CW3Loaded && StrEqual(name, CW3A_LIBRARY))
+		CW3Loaded = false;
 	#endif
-
-	#if defined __tf_custom_attributes_included
-	if(TCALoaded)
-		return TCALoaded;
-	#endif
-
-	return false;
 }
 
 stock void CustomAttrib_PrintStatus()
 {
 	#if defined __tf_econ_dyn_included
-	if(GetFeatureStatus(FeatureType_Native, "TF2EconDynAttribute.TF2EconDynAttribute") != FeatureStatus_Available)
-		TFEYLoaded = false;
-
+	TFEYLoaded = (GetFeatureStatus(FeatureType_Native, "TF2EconDynAttribute.TF2EconDynAttribute") != FeatureStatus_Available);
+	
 	PrintToServer("'%s' is %sloaded", TFEY_LIBRARY, TFEYLoaded ? "" : "not ");
 	#else
 	PrintToServer("'%s' not compiled", TFEY_LIBRARY);
@@ -110,60 +115,105 @@ stock void CustomAttrib_PrintStatus()
 	#else
 	PrintToServer("'%s' not compiled", TCA_LIBRARY);
 	#endif
+
+	#if defined _cw3_attributes_included_
+	PrintToServer("'%s' is %sloaded", CW3A_LIBRARY, CW3Loaded ? "" : "not ");
+	#else
+	PrintToServer("'%s' not compiled", CW3A_LIBRARY);
+	#endif
 }
 
-void CustomAttrib_ApplyFromCfg(int entity, ConfigMap cfg)
+stock void CustomAttrib_ApplyFromCfg(int entity, ConfigMap cfg)
 {
-	StringMapSnapshot snap = cfg.Snapshot();
-	
-	int entries = snap.Length;
-	for(int i; i < entries; i++)
+	ConfigMap custom = cfg.GetSection("custom");
+	if(custom)
 	{
-		int length = snap.KeyBufferSize(i) + 1;
-		
-		char[] key = new char[length];
-		snap.GetKey(i, key, length);
-		
-		static PackVal attribute;	
-		cfg.GetArray(key, attribute, sizeof(attribute));
-		if(attribute.tag == KeyValType_Value)
-		{
-			#if defined __tf_custom_attributes_included
-			if(TCALoaded)
-			{
-				TF2CustAttr_SetString(entity, key, attribute.data);
-				continue;
-			}
-			#endif
-
-		#if defined IS_MAIN_FF2
-			#if defined __tf_econ_dyn_included
-			if(TFEYLoaded)
-			{
-				Attrib_SetString(entity, key, attribute.data);
-				continue;
-			}
-			#endif
-			
-			if(StrEqual(key, "damage vs bosses"))
-			{
-				Attrib_Set(entity, "damage bonus HIDDEN", StringToFloat(attribute.data));
-			}
-			else if(StrEqual(key, "mod crit type on bosses"))
-			{
-				Attrib_Set(entity, "crit vs burning players", 1.0);
-				Attrib_Set(entity, "crit vs non burning players", 1.0);
-
-				if(StringToInt(attribute.data) == 1)
-					Attrib_Set(entity, "crits_become_minicrits", 1.0);
-			}
-		#else
-			Attrib_SetString(entity, key, attribute.data);
+		#if defined _cw3_attributes_included_
+		char buffer[64];
+		GetEntityClassname(entity, buffer, sizeof(buffer));
+		int slot = TF2_GetClassnameSlot(buffer);
 		#endif
+
+		StringMapSnapshot snap = custom.Snapshot();
+		
+		int entries = snap.Length;
+		for(int i; i < entries; i++)
+		{
+			int length = snap.KeyBufferSize(i) + 1;
+			
+			char[] key = new char[length];
+			snap.GetKey(i, key, length);
+			
+			static PackVal attribute;	
+			custom.GetArray(key, attribute, sizeof(attribute));
+			switch(attribute.tag)
+			{
+				case KeyValType_Section:
+				{
+					attribute.cfg.Get("value", attribute.data, sizeof(attribute.data));
+					
+					#if defined _cw3_attributes_included_
+					attribute.cfg.Get("plugin", buffer, sizeof(buffer));
+					
+					if(CW3Loaded && buffer[0])
+					{
+						if(StrEqual(attribute.data, "R"))
+						{
+							bool active;
+							attribute.cfg.GetBool("while active", active, false);
+							CW3_AddAttribute(slot, GetEntPropEnt(entity, Prop_Send, "m_hOwnerEntity"), key, buffer, "", active);
+						}
+						else
+						{
+							bool active;
+							attribute.cfg.GetBool("while active", active, false);
+							CW3_AddAttribute(slot, GetEntPropEnt(entity, Prop_Send, "m_hOwnerEntity"), key, buffer, attribute.data, active);
+						}
+
+						continue;
+					}
+					#endif
+				}
+				case KeyValType_Value:
+				{
+				}
+				default:
+				{
+					continue;
+				}
+			}
+			
+			if(StrEqual(attribute.data, "R"))
+			{
+				#if defined __tf_custom_attributes_included
+				if(TCALoaded)
+					TF2CustAttr_SetFloat(entity, key, 0.0);
+				#endif
+
+				#if defined IS_MAIN_FF2
+				Attrib_Set(entity, key, _, 0.0);
+				#else
+				Attrib_Remove(entity, key);
+				#endif
+			}
+			else
+			{
+				CustomAttrib_SetString(entity, key, attribute.data);
+			}
 		}
+		
+		delete snap;
 	}
+}
+
+stock void CustomAttrib_SetString(int entity, const char[] key, const char[] value)
+{
+	#if defined __tf_custom_attributes_included
+	if(TCALoaded)
+		TF2CustAttr_SetString(entity, key, value);
+	#endif
 	
-	delete snap;
+	Attrib_SetString(entity, key, _, value);
 }
 
 stock float CustomAttrib_FindOnPlayer(int client, const char[] name, bool multi = false)
@@ -197,7 +247,7 @@ stock float CustomAttrib_FindOnPlayer(int client, const char[] name, bool multi 
 	int active = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
 	while(TF2_GetItem(client, entity, i))
 	{
-		if(active != entity && Attrib_Get(entity, "provide on active", value) && value)
+		if(active != entity && Attrib_Get(entity, "provide on active", 128, value) && value)
 			continue;
 		
 		if(CustomAttrib_Get(entity, name, value))
@@ -253,7 +303,7 @@ stock float CustomAttrib_FindOnWeapon(int client, int entity, const char[] name,
 	{
 		char classname[18];
 		GetEntityClassname(entity, classname, sizeof(classname));
-		if(!StrContains(classname, "tf_w") || StrEqual(classname, "tf_powerup_bottle"))
+		if(!StrContains(classname, "tf_wea") || !StrContains(classname, "tf2c_wea") || StrEqual(classname, "tf_powerup_bottle"))
 		{
 			if(CustomAttrib_Get(entity, name, value))
 			{
@@ -281,8 +331,8 @@ stock bool CustomAttrib_Get(int weapon, const char[] name, float &value = 0.0)
 	#if defined __tf_custom_attributes_included
 	if(TCALoaded)
 	{
-		float result = TF2CustAttr_GetFloat(weapon, name, DEFAULT_VALUE_TEST);
-		if(result != DEFAULT_VALUE_TEST)
+		float result = TF2CustAttr_GetFloat(weapon, name, CUSTOMATTRIBFF2_INCLUDED);
+		if(result != CUSTOMATTRIBFF2_INCLUDED)
 		{
 			value = result;
 			return true;
@@ -290,7 +340,7 @@ stock bool CustomAttrib_Get(int weapon, const char[] name, float &value = 0.0)
 	}
 	#endif
 
-	return Attrib_Get(weapon, name, value);
+	return Attrib_Get(weapon, name, _, value);
 }
 
 stock bool CustomAttrib_GetString(int weapon, const char[] name, char[] buffer, int length)
@@ -303,12 +353,31 @@ stock bool CustomAttrib_GetString(int weapon, const char[] name, char[] buffer, 
 	}
 	#endif
 
-	return Attrib_GetString(weapon, name, buffer, length);
+	return Attrib_GetString(weapon, name, _, buffer, length);
 }
 
 #if !defined IS_MAIN_FF2
 	#endinput
 #endif
+
+public Action CW3_OnAddAttribute(int slot, int client, const char[] attrib, const char[] plugin, const char[] value, bool whileActive)
+{
+	if(!StrEqual(plugin, "freak_fortress_2"))
+		return Plugin_Continue;
+	
+	int weapon = GetPlayerWeaponSlot(client, slot);
+	if(weapon != -1)
+		Attrib_SetString(weapon, attrib, _, value);
+	
+	return Plugin_Handled;
+}
+
+public void CW3_OnWeaponRemoved(int slot, int client)
+{
+	int weapon = GetPlayerWeaponSlot(client, slot);
+	if(weapon != -1)
+		VScript_RemoveAllAttributes(weapon, true);
+}
 
 #if defined __tf_econ_dyn_included
 static void AddAttributes()
@@ -355,6 +424,12 @@ static void AddAttributes()
 	attrib.SetClass("ff2.stale_boss_hit_reload");
 	attrib.SetDescriptionFormat("additive");
 	attrib.SetCustom("description_ff2_string", "mod reload time hit stale");
+	attrib.Register();
+
+	attrib.SetName("mod recharge time hit stale");
+	attrib.SetClass("ff2.stale_boss_hit_charge");
+	attrib.SetDescriptionFormat("additive");
+	attrib.SetCustom("description_ff2_string", "mod recharge time hit stale");
 	attrib.Register();
 
 	attrib.SetName("primary damage vs bosses");
@@ -453,99 +528,116 @@ static void AddAttributes()
 	attrib.SetCustom("description_ff2_string", "melee sickle climb");
 	attrib.Register();
 
+	attrib.SetName("boost on damage drain multi");
+	attrib.SetClass("ff2.mod_boost_decay");
+	attrib.SetDescriptionFormat("value_is_percentage");
+	attrib.SetCustom("description_ff2_string", "");
+	attrib.Register();
+
 	attrib.SetName("milk limit DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_1");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "milk limit DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("hit stale DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_2");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "hit stale DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("sentry death DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_3");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "sentry death DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("jarate limit DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_4");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "jarate limit DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("boost limit DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_5");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "boost limit DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("teleport no spawn DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_6");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "teleport no spawn DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("vaccinator DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_7");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "vaccinator DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("cloak on hit DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_8");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "cloak on hit DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("cloak and dagger no DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_9");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "cloak and dagger no DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("laugh is slow DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_10");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "laugh is slow DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("caber boss crit DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_11");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "caber boss crit DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("start with uber DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_12");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "start with uber DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("mark limit DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_13");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "mark limit DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("health drop on damage DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_14");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "health drop on damage DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("resist effects stuns DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_15");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "resist effects stuns DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("kill effects boss hits DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_16");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "kill effects boss hits DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("backstabs DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_17");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "backstabs DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("disguise resistance DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_18");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "disguise resistance DISPLAY ONLY");
 	attrib.Register();
 
 	attrib.SetName("sapper boss effect DISPLAY ONLY");
-	attrib.SetClass("ff2.displayonly_19");
+	attrib.SetClass("ff2.displayonly");
 	attrib.SetCustom("description_ff2_string", "sapper boss effect DISPLAY ONLY");
+	attrib.Register();
+
+	attrib.SetName("is custom weapon");
+	attrib.SetClass("ff2.overrideconfig");
+	attrib.SetCustom("description_ff2_string", "");
+	attrib.Register();
+
+	attrib.SetName("dmg taken from fall reduced");
+	attrib.SetClass("ff2.mult_dmgtaken_from_fall");
+	attrib.SetDescriptionFormat("value_is_percentage");
+	attrib.SetCustom("description_ff2_string", "dmg taken from fall reduced");
 	attrib.Register();
 	
 	delete attrib;
@@ -586,11 +678,11 @@ void CustomAttrib_OnHitBossPre(int attacker, int victim, float &damage, int &dam
 					
 					if(MultiBosses())
 					{
-						Bosses_PlaySoundToAll(victim, "sound_marketed", _, victim, SNDCHAN_AUTO, SNDLEVEL_AIRCRAFT, _, 2.0);
+						Bosses_PlaySoundToAll(victim, "sound_marketed", _, victim, SNDCHAN_AUTO, SNDLEVEL_AIRCRAFT, _, SNDVOL_BOSS);
 					}
 					else
 					{
-						Bosses_PlaySoundToAll(victim, "sound_marketed", _, _, _, _, _, 2.0);
+						Bosses_PlaySoundToAll(victim, "sound_marketed", _, _, _, _, _, SNDVOL_BOSS);
 					}
 				}
 				
@@ -603,7 +695,7 @@ void CustomAttrib_OnHitBossPre(int attacker, int victim, float &damage, int &dam
 	
 	value = CustomAttrib_FindOnWeapon(attacker, weapon, "mod stun boss on hit");
 	if(value)
-		TF2_StunPlayer(victim, value, 0.0, TF_STUNFLAGS_SMALLBONK|TF_STUNFLAG_NOSOUNDOREFFECT, attacker);
+		TF2Tools_StunPlayer(victim, value, 0.0, TF_STUNFLAGS_SMALLBONK|TF_STUNFLAG_NOSOUNDOREFFECT, attacker);
 	
 	value = CustomAttrib_FindOnWeapon(attacker, weapon, "mod rage loss on hit");
 	if(value)
@@ -649,11 +741,8 @@ void CustomAttrib_OnHitBossPre(int attacker, int victim, float &damage, int &dam
 				SetEntProp(weapon, Prop_Send, "m_iAccountID", 0);
 				
 				float initial = 1.0;
-				if(TF2ED_GetAttributeName(attrib, buffer, sizeof(buffer)))
-				{
-					Attrib_Get(weapon, buffer, initial);
-					Attrib_Set(weapon, buffer, initial + StringToFloat(buffers[1]));
-				}
+				Attrib_Get(weapon, _, attrib, initial);
+				Attrib_Set(weapon, _, attrib, initial + StringToFloat(buffers[1]));
 			}
 		}
 		
@@ -663,8 +752,8 @@ void CustomAttrib_OnHitBossPre(int attacker, int victim, float &damage, int &dam
 			SetEntProp(weapon, Prop_Send, "m_iAccountID", 0);
 			
 			float initial = 1.0;
-			Attrib_Get(weapon, "fire rate penalty", initial);
-			Attrib_Set(weapon, "fire rate penalty", initial + value);
+			Attrib_Get(weapon, "fire rate penalty", 5, initial);
+			Attrib_Set(weapon, "fire rate penalty", 5, initial + value);
 		}
 
 		value = CustomAttrib_FindOnWeapon(attacker, weapon, "mod reload time hit stale");
@@ -673,8 +762,18 @@ void CustomAttrib_OnHitBossPre(int attacker, int victim, float &damage, int &dam
 			SetEntProp(weapon, Prop_Send, "m_iAccountID", 0);
 			
 			float initial = 1.0;
-			Attrib_Get(weapon, "Reload time increased", initial);
-			Attrib_Set(weapon, "Reload time increased", initial + value);
+			Attrib_Get(weapon, "Reload time increased", 96, initial);
+			Attrib_Set(weapon, "Reload time increased", 96, initial + value);
+		}
+
+		value = CustomAttrib_FindOnWeapon(attacker, weapon, "mod recharge time hit stale");
+		if(value != 0.0)
+		{
+			SetEntProp(weapon, Prop_Send, "m_iAccountID", 0);
+			
+			float initial = 1.0;
+			Attrib_Get(weapon, "effect bar recharge rate increased", 278, initial);
+			Attrib_Set(weapon, "effect bar recharge rate increased", 278, initial + value);
 		}
 
 		if(GetEntityClassname(weapon, buffer, sizeof(buffer)))
@@ -698,19 +797,19 @@ void CustomAttrib_OnHitBossPre(int attacker, int victim, float &damage, int &dam
 					
 					if(MultiBosses())
 					{
-						Bosses_PlaySoundToAll(victim, "sound_cabered", _, victim, SNDCHAN_AUTO, SNDLEVEL_AIRCRAFT, _, 2.0);
+						Bosses_PlaySoundToAll(victim, "sound_cabered", _, victim, SNDCHAN_AUTO, SNDLEVEL_AIRCRAFT, _, SNDVOL_BOSS);
 					}
 					else
 					{
-						Bosses_PlaySoundToAll(victim, "sound_cabered", _, _, _, _, _, 2.0);
+						Bosses_PlaySoundToAll(victim, "sound_cabered", .volume = SNDVOL_BOSS);
 					}
 				}
 			}
 		}
 	}
 	
-	if((!critType && !(damagetype & DMG_CRIT)) && ((TF2_IsPlayerInCondition(attacker, TFCond_BlastJumping) && Attrib_FindOnWeapon(attacker, weapon, "rocketjump attackrate bonus")) ||
-	   ((TF2_IsPlayerInCondition(attacker, TFCond_Disguised) || TF2_IsPlayerInCondition(attacker, TFCond_DisguiseRemoved)) && Attrib_FindOnWeapon(attacker, weapon, "damage bonus while disguised"))))
+	if((!critType && !(damagetype & DMG_CRIT)) && ((TF2_IsPlayerInCondition(attacker, TFCond_BlastJumping) && Attrib_FindOnWeapon(attacker, weapon, "rocketjump attackrate bonus", 621)) ||
+	   ((TF2_IsPlayerInCondition(attacker, TFCond_Disguised) || TF2_IsPlayerInCondition(attacker, TFCond_DisguiseRemoved)) && Attrib_FindOnWeapon(attacker, weapon, "damage bonus while disguised", 410))))
 	{
 		critType = 1;
 	}
@@ -764,8 +863,8 @@ void CustomAttrib_OnAirblastBoss(int victim, int attacker)
 			SetEntProp(weapon, Prop_Send, "m_iAccountID", 0);
 			
 			float initial = 1.0;
-			Attrib_Get(weapon, "mult airblast refire time", initial);
-			Attrib_Set(weapon, "mult airblast refire time", initial + value);
+			Attrib_Get(weapon, "mult airblast refire time", 256, initial);
+			Attrib_Set(weapon, "mult airblast refire time", 256, initial + value);
 		}
 
 		if(CustomAttrib_Get(weapon, "mod airblast rage", value))
@@ -820,11 +919,11 @@ static void WeaponSwitchFrame(int userid)
 			{
 				case 1:
 				{
-					TF2_RemoveCondition(client, (class == TFClass_Scout || class == TFClass_Heavy) ? TFCond_Buffed : TFCond_CritCola);
+					TF2Tools_RemoveCondition(client, (class == TFClass_Scout || class == TFClass_Heavy) ? TFCond_Buffed : TFCond_CritCola);
 				}
 				case 2:
 				{
-					TF2_RemoveCondition(client, TFCond_CritOnDamage);
+					TF2Tools_RemoveCondition(client, TFCond_CritOnDamage);
 				}
 			}
 			
@@ -834,12 +933,12 @@ static void WeaponSwitchFrame(int userid)
 			{
 				case 1:
 				{
-					TF2_AddCondition(client, (class == TFClass_Scout || class == TFClass_Heavy) ? TFCond_Buffed : TFCond_CritCola);
+					TF2Tools_AddCondition(client, (class == TFClass_Scout || class == TFClass_Heavy) ? TFCond_Buffed : TFCond_CritCola);
 					HasCritGlow[client] = 1;
 				}
 				case 2:
 				{
-					TF2_AddCondition(client, TFCond_CritOnDamage);
+					TF2Tools_AddCondition(client, TFCond_CritOnDamage);
 					HasCritGlow[client] = 2;
 				}
 				default:
@@ -880,13 +979,13 @@ static Action UberTimer(Handle timer, int ref)
 			{
 				if(GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") == weapon)
 				{
-					TF2_AddCondition(client, TFCond_HalloweenCritCandy, 0.5, client);
+					TF2Tools_AddCondition(client, TFCond_HalloweenCritCandy, 0.5, client);
 
 					if(GetEntProp(weapon, Prop_Send, "m_bHealing"))
 					{
 						int target = GetEntPropEnt(weapon, Prop_Send, "m_hHealingTarget");
 						if(target != -1)
-							TF2_AddCondition(target, TFCond_HalloweenCritCandy, 0.5, client);
+							TF2Tools_AddCondition(target, TFCond_HalloweenCritCandy, 0.5, client);
 					}
 				}
 
@@ -909,7 +1008,7 @@ static void ApplyRage(int victim, int attacker, float amount)
 			rage += amount;
 			if(rage > maxrage)
 			{
-				Bosses_PlaySoundToAll(victim, "sound_full_rage", _, victim, SNDCHAN_AUTO, SNDLEVEL_AIRCRAFT, _, 2.0);
+				Bosses_PlaySoundToAll(victim, "sound_full_rage", _, victim, SNDCHAN_AUTO, SNDLEVEL_AIRCRAFT, _, SNDVOL_BOSS);
 				rage = maxrage;
 			}
 			else if(rage < 0.0)
@@ -928,7 +1027,7 @@ static void ApplyRage(int victim, int attacker, float amount)
 void CustomAttrib_CalcIsAttackCritical(int client, int weapon)
 {
 	float damage;
-	if(CustomAttrib_Get(weapon, "melee sickle climb"))
+	if(CustomAttrib_Get(weapon, "melee sickle climb", damage))
 	{
 		float pos[3];
 		float ang[3];
@@ -947,7 +1046,7 @@ void CustomAttrib_CalcIsAttackCritical(int client, int weapon)
 			{
 				if(vec[0] > -30.0)
 				{
-					TR_GetEndPosition(vec);
+					TR_GetEndPosition(vec, trace);
 
 					if(GetVectorDistance(pos, vec, true) < 10000.0)
 					{

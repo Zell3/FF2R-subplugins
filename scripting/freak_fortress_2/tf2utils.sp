@@ -19,6 +19,8 @@ void TF2U_PluginLoad()
 	MarkNativeAsOptional("TF2Util_SetPlayerActiveWeapon");
 	MarkNativeAsOptional("TF2Util_IsPointInRespawnRoom");
 	MarkNativeAsOptional("TF2Util_GetPlayerLoadoutEntity");
+	MarkNativeAsOptional("TF2Util_StartLagCompensation");
+	MarkNativeAsOptional("TF2Util_FinishLagCompensation");
 	#endif
 }
 
@@ -125,8 +127,8 @@ stock int TF2U_GetMaxOverheal(int client)
 	
 	int maxhealth = SDKCall_GetMaxHealth(client);
 	float maxoverheal = float(maxhealth) * 0.75;
-	maxoverheal *= Attrib_FindOnPlayer(client, "patient overheal penalty", true);
-	maxoverheal *= Attrib_FindOnWeapon(client, GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon"), "mult_patient_overheal_penalty_active", true);
+	maxoverheal *= Attrib_FindOnPlayer(client, "patient overheal penalty", 800, true);
+	maxoverheal *= Attrib_FindOnWeapon(client, GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon"), "mult_patient_overheal_penalty_active", 853, true);
 	return maxhealth + (RoundToFloor(maxoverheal / 5.0) * 5);
 }
 
@@ -171,7 +173,7 @@ stock bool TF2U_IsInRespawnRoom(int entity)
 	}
 	#endif
 
-	return !entity;
+	return entity == 0;
 }
 
 stock int TF2U_GetPlayerLoadoutEntity(int client, int loadoutSlot, bool includeWearableWeapons = true)
@@ -216,4 +218,20 @@ stock int TF2U_GetPlayerLoadoutEntity(int client, int loadoutSlot, bool includeW
 	}
 
 	return entity;
+}
+
+public void TF2U_StartLagCompensation(int client)
+{
+	#if defined __nosoop_tf2_utils_included
+	if(Loaded)
+		TF2Util_StartLagCompensation(client);
+	#endif
+}
+
+public void TF2U_FinishLagCompensation(int client)
+{
+	#if defined __nosoop_tf2_utils_included
+	if(Loaded)
+		TF2Util_FinishLagCompensation(client);
+	#endif
 }
