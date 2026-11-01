@@ -77,7 +77,7 @@ static const char BossIsVictorious[][] = {
 public Plugin myinfo =
 {
   name        = "[FF2R] Mannup Ability",
-  author      = "zell inspired M7",
+  author      = "M7, Zell",
   description = "",
   version     = "1.0.1",
   url         = ""
